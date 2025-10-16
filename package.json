@@ -1,0 +1,53 @@
+{
+  "name": "@hiscojs/yaml-updater",
+  "version": "1.0.0",
+  "description": "Type-safe, immutable YAML updates with comment preservation, multi-document support, and advanced array merging strategies",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "jest",
+    "build": "rm -rf dist && tsc",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "yaml",
+    "update",
+    "merge",
+    "immutable",
+    "typescript",
+    "type-safe",
+    "proxy",
+    "comment-preservation",
+    "multi-document",
+    "array-merge"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hisco/yaml-updater.git"
+  },
+  "dependencies": {
+    "@hiscojs/object-updater": "^1.0.0",
+    "deep-diff": "^1.0.2",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@jest/globals": "^29.7.0",
+    "@types/deep-diff": "^1.0.5",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}

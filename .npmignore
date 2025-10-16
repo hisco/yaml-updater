@@ -1,0 +1,32 @@
+# Source files (only ship built dist/)
+src
+*.test.ts
+*.spec.ts
+
+# Build configuration
+jest.config.js
+tsconfig.json
+
+# Development files
+example.ts
+.gitignore
+
+# Test coverage
+coverage
+
+# Dependencies (already in package.json)
+node_modules
+package-lock.json
+
+# OS files
+.DS_Store
+
+# IDE files
+.vscode
+.idea
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

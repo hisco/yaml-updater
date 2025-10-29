@@ -1,4 +1,4 @@
-import { updateYaml, addInstructions } from './index';
+import { updateYaml, addInstructions, selectFirstDocument } from './index';
 import { describe, it, expect } from '@jest/globals';
 
 // Common type definitions for tests
@@ -389,6 +389,111 @@ services:
     });
   });
 
+  describe('array updates without merge instructions', () => {
+    it('should replace array entirely when no merge instructions provided', () => {
+      const yamlString = `
+items:
+  - id: 1
+    name: first
+  - id: 2
+    name: second
+  - id: 3
+    name: third
+`;
+
+      interface Item {
+        id: number;
+        name: string;
+      }
+
+      interface Data {
+        items: Item[];
+      }
+
+      const { resultParsed, result } = updateYaml<Data>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.items,
+            merge: () => [
+              { id: 1, name: 'first' },
+              { id: 4, name: 'fourth' }
+            ]
+          });
+        }
+      });
+
+      // Without merge instructions, array should be completely replaced
+      expect(resultParsed.items).toHaveLength(2);
+      expect(resultParsed.items.find(i => i.id === 1)).toBeDefined();
+      expect(resultParsed.items.find(i => i.id === 4)).toBeDefined();
+      expect(resultParsed.items.find(i => i.id === 2)).toBeUndefined();
+      expect(resultParsed.items.find(i => i.id === 3)).toBeUndefined();
+    });
+
+    it('should replace array when item IDs change without merge instructions', () => {
+      const yamlString = `
+services:
+  - id: api
+    port: 8080
+  - id: db
+    port: 5432
+`;
+
+      interface Service {
+        id: string;
+        port: number;
+      }
+
+      interface Config {
+        services: Service[];
+      }
+
+      const { resultParsed } = updateYaml<Config>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.services,
+            merge: () => [
+              { id: 'api', port: 8080 },
+              { id: 'cache', port: 6379 }  // 'db' -> 'cache'
+            ]
+          });
+        }
+      });
+
+      // Should replace, not add
+      expect(resultParsed.services).toHaveLength(2);
+      expect(resultParsed.services.find(s => s.id === 'api')).toBeDefined();
+      expect(resultParsed.services.find(s => s.id === 'cache')).toBeDefined();
+      expect(resultParsed.services.find(s => s.id === 'db')).toBeUndefined();
+    });
+
+    it('should handle empty array replacement', () => {
+      const yamlString = `
+items:
+  - id: 1
+  - id: 2
+`;
+
+      interface Data {
+        items: { id: number }[];
+      }
+
+      const { resultParsed } = updateYaml<Data>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.items,
+            merge: () => []
+          });
+        }
+      });
+
+      expect(resultParsed.items).toHaveLength(0);
+    });
+  });
+
   describe('comment tracking', () => {
     it('should track comments for root-level changes', () => {
       const yamlString = `
@@ -763,8 +868,359 @@ data:
         }
       });
 
-      expect(result).toContain('# Configuration data');
-      expect(comments.some(c => c.comment === 'Configuration data')).toBe(true);
+      expect(result).toBe(`apiVersion: v1
+kind: ConfigMap
+# Configuration data
+data:
+  database: localhost
+  cache: redis
+`)
+    });
+
+    it('should add comments to nested properties via addInstructions', () => {
+      const yamlString = `
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: app
+          image: myapp:1.0
+`;
+
+      interface Deployment {
+        apiVersion: string;
+        kind: string;
+        spec: {
+          replicas: number;
+          template: {
+            spec: {
+              containers: Array<{ name: string; image: string }>;
+            };
+          };
+        };
+      }
+
+      const { result } = updateYaml<Deployment>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'spec',
+                comment: 'Deployment specification'
+              }),
+              spec: {
+                ...addInstructions({
+                  prop: 'replicas',
+                  comment: 'Number of pod replicas'
+                }),
+                replicas: 3,
+                ...addInstructions({
+                  prop: 'template',
+                  comment: 'Pod template'
+                }),
+                template: {
+                  spec: {
+                    containers: [
+                      {
+                        name: 'app',
+                        image: 'myapp:1.0'
+                      }
+                    ]
+                  }
+                }
+              }
+            })
+          });
+        }
+      });
+
+      expect(result).toBe(`apiVersion: apps/v1
+kind: Deployment
+# Deployment specification
+spec:
+  # Number of pod replicas
+  replicas: 3
+  # Pod template
+  template:
+    spec:
+      containers:
+        - name: app
+          image: myapp:1.0
+`)
+    });
+
+    it('should add comments to deeply nested properties', () => {
+      const yamlString = `
+config:
+  database:
+    connection:
+      host: localhost
+      port: 5432
+`;
+
+      interface Config {
+        config: {
+          database: {
+            connection: {
+              host: string;
+              port: number;
+            };
+          };
+        };
+      }
+
+      const { result } = updateYaml<Config>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.config,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'database',
+                comment: 'Database configuration'
+              }),
+              database: {
+                ...addInstructions({
+                  prop: 'connection',
+                  comment: 'Connection settings'
+                }),
+                connection: {
+                  ...addInstructions({
+                    prop: 'host',
+                    comment: 'Database host'
+                  }),
+                  host: 'localhost',
+                  ...addInstructions({
+                    prop: 'port',
+                    comment: 'Database port'
+                  }),
+                  port: 5432
+                }
+              }
+            })
+          });
+        }
+      });
+
+      expect(result).toBe(`config:
+  # Database configuration
+  database:
+    # Connection settings
+    connection:
+      # Database host
+      host: localhost
+      # Database port
+      port: 5432
+`)
+    });
+
+    it('should format properties as JSON using flow style', () => {
+      const yamlString = `
+items:
+  - item1
+  - item2
+`;
+
+      interface Config {
+        items: string[];
+        thisisJson?: Record<string, unknown>;
+        jsons?: Array<Record<string, unknown>>;
+      }
+
+      const { result } = updateYaml<Config>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'thisisJson',
+                flow: true  // Format as JSON: {}
+              }),
+              thisisJson: {},
+              ...addInstructions({
+                prop: 'items',
+                flow: false  // Format as YAML block style
+              }),
+              items: ['item1', 'item2'],
+              ...addInstructions({
+                prop: 'jsons',
+                flow: true  // Format as JSON: [{}, {key: 1}]
+              }),
+              jsons: [
+                {},
+                { key: 1 }
+              ]
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('thisisJson: {}');
+      expect(result).toContain('items:');
+      expect(result).toContain('  - item1');
+      expect(result).toContain('  - item2');
+      // Flow style adds spaces in arrays/objects
+      expect(result).toContain('jsons: [ {}, { key: 1 } ]');
+    });
+
+    it('should control flow style for individual array items', () => {
+      const yamlString = `
+items: []
+`;
+
+      interface Config {
+        items: Array<Record<string, unknown>>;
+      }
+
+      const { result } = updateYaml<Config>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'items',
+                flowItems: [true, false, true]  // First: JSON, Second: YAML, Third: JSON
+              }),
+              items: [
+                { id: 1, name: 'first' },
+                { id: 2, name: 'second' },
+                { id: 3, name: 'third' }
+              ]
+            })
+          });
+        }
+      });
+
+      // First item should be in flow style (JSON - single line)
+      expect(result).toContain('- { id: 1, name: first }');
+
+      // Second item should be in block style (YAML - multi-line)
+      expect(result).toContain('- id: 2');
+      expect(result).toContain('  name: second');
+
+      // Third item should be in flow style (JSON - single line)
+      expect(result).toContain('- { id: 3, name: third }');
+    });
+
+    it('should mix empty objects and objects with data using flowItems', () => {
+      const yamlString = `
+jsons: []
+`;
+
+      interface Config {
+        jsons: Array<Record<string, unknown>>;
+      }
+
+      const { result } = updateYaml<Config>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'jsons',
+                flowItems: [true, false]  // First: JSON (empty {}), Second: YAML (with data)
+              }),
+              jsons: [
+                {},
+                { key: 1 }
+              ]
+            })
+          });
+        }
+      });
+
+      // First item should be empty object in JSON format
+      expect(result).toContain('- {}');
+
+      // Second item should be in YAML block style
+      expect(result).toContain('- key: 1');
+    });
+
+    it('should support mixed YAML and JSON formatting in same document', () => {
+      const yamlString = `
+config:
+  name: myapp
+`;
+
+      interface Config {
+        config: {
+          name: string;
+          settings?: {
+            debug: boolean;
+            timeout: number;
+          };
+          metadata?: Record<string, string>;
+          tags?: string[];
+          features?: string[];
+        };
+      }
+
+      const { result } = updateYaml<Config>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.config,
+            merge: () => ({
+              name: 'myapp',
+              // YAML block style (default)
+              ...addInstructions({
+                prop: 'settings',
+                comment: 'Settings in YAML block style'
+              }),
+              settings: {
+                debug: true,
+                timeout: 30
+              },
+              // JSON flow style
+              ...addInstructions({
+                prop: 'metadata',
+                comment: 'Metadata in JSON flow style',
+                flow: true
+              }),
+              metadata: { version: '1.0', env: 'prod' },
+              // JSON flow style for array
+              ...addInstructions({
+                prop: 'tags',
+                comment: 'Tags in JSON flow style',
+                flow: true
+              }),
+              tags: ['tag1', 'tag2', 'tag3'],
+              // YAML block style for array
+              ...addInstructions({
+                prop: 'features',
+                comment: 'Features in YAML block style',
+                flow: false
+              }),
+              features: ['feature1', 'feature2']
+            })
+          });
+        }
+      });
+
+      // Verify YAML block style for settings (multi-line format)
+      expect(result).toContain('settings:');
+      expect(result).toContain('  debug: true');
+      expect(result).toContain('  timeout: 30');
+
+      // Verify JSON flow style for metadata (single-line format)
+      expect(result).toContain('metadata: { version:');
+      expect(result).toContain('env: prod');
+
+      // Verify JSON flow style for tags array (single-line format)
+      expect(result).toContain('tags: [ tag1, tag2, tag3 ]');
+
+      // Verify YAML block style for features array (multi-line format)
+      expect(result).toContain('features:');
+      expect(result).toContain('  - feature1');
+      expect(result).toContain('  - feature2');
     });
 
     it('should remove existing comment via addInstructions', () => {
@@ -1699,7 +2155,8 @@ database:
         }
       });
 
-      expect(result).toContain('# Database configuration');
+      // Old comment is replaced by new comment when using addInstructions
+      expect(result).not.toContain('# Database configuration');
       expect(result).toContain('# Updated database configuration');
       expect(result).toContain('db.prod.com');
       // Note: When replacing entire structure, inner comments (Connection settings, Host setting, Port setting)
@@ -1894,12 +2351,692 @@ root:
         }
       });
 
-      expect(result).toContain('# Existing root');
+      // Old comments are replaced when using addInstructions
+      expect(result).not.toContain('# Existing root');
       expect(result).toContain('# New root comment');
       expect(result).toContain('# New level1 comment');
       expect(result).toContain('value: updated');
-      // Note: "# Existing level1" is replaced by "# New level1 comment" because we're replacing
+      // Note: "# Existing level1" is also replaced by "# New level1 comment" because we're replacing
       // the entire root structure. To preserve, use originalValue with spread operator.
+    });
+  });
+
+  describe('multi-document YAML support', () => {
+    it('should select the first document using selectFirstDocument', () => {
+      const yamlString = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: first-config
+data:
+  key1: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: second-config
+data:
+  key2: value2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: third-service
+spec:
+  port: 8080`;
+
+      interface ConfigMap {
+        apiVersion: string;
+        kind: string;
+        metadata: {
+          name: string;
+        };
+        data: {
+          [key: string]: string;
+        };
+      }
+
+      const { result, resultParsed } = updateYaml<ConfigMap>({
+        yamlString,
+        selectDocument: selectFirstDocument, // Explicitly use selectFirstDocument
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.data,
+            merge: () => ({
+              key1: 'updated-value1',
+              newKey: 'new-value'
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.metadata.name).toBe('first-config');
+      expect(resultParsed.data.key1).toBe('updated-value1');
+      expect(resultParsed.data.newKey).toBe('new-value');
+      expect(result).toContain('key1: updated-value1');
+      expect(result).toContain('newKey: new-value');
+      // Verify second document is unchanged
+      expect(result).toContain('name: second-config');
+      expect(result).toContain('key2: value2');
+    });
+
+    it('should select any document by index', () => {
+      const yamlString = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: first-config
+data:
+  env: dev
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: second-config
+data:
+  env: staging
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: third-config
+data:
+  env: production`;
+
+      interface ConfigMap {
+        apiVersion: string;
+        kind: string;
+        metadata: {
+          name: string;
+        };
+        data: {
+          env: string;
+        };
+      }
+
+      // Test selecting the second document (index 1)
+      const { result: result2, resultParsed: parsed2 } = updateYaml<ConfigMap>({
+        yamlString,
+        selectDocument: () => 1, // Select second document
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.data,
+            merge: () => ({
+              env: 'updated-staging',
+              newProp: 'added-to-second'
+            })
+          });
+        }
+      });
+
+      expect(parsed2.metadata.name).toBe('second-config');
+      expect(parsed2.data.env).toBe('updated-staging');
+      expect(result2).toContain('env: updated-staging');
+      expect(result2).toContain('newProp: added-to-second');
+      // Verify first and third documents are unchanged
+      expect(result2).toContain('name: first-config');
+      expect(result2).toContain('env: dev');
+      expect(result2).toContain('name: third-config');
+      expect(result2).toContain('env: production');
+
+      // Test selecting the third document (index 2)
+      const { result: result3, resultParsed: parsed3 } = updateYaml<ConfigMap>({
+        yamlString,
+        selectDocument: () => 2, // Select third document
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.metadata,
+            merge: () => ({
+              name: 'renamed-config',
+              namespace: 'custom'
+            })
+          });
+        }
+      });
+
+      expect(parsed3.metadata.name).toBe('renamed-config');
+      expect((parsed3.metadata as any).namespace).toBe('custom');
+      expect(result3).toContain('name: renamed-config');
+      expect(result3).toContain('namespace: custom');
+      // Verify first and second documents are unchanged
+      expect(result3).toContain('name: first-config');
+      expect(result3).toContain('name: second-config');
+    });
+
+    it('should handle document selection with type safety', () => {
+      const yamlString = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+data:
+  key: value
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: app
+          image: myapp:1.0`;
+
+      // Define different types for different documents
+      interface ConfigMap {
+        apiVersion: string;
+        kind: 'ConfigMap';
+        metadata: { name: string };
+        data: { [key: string]: string };
+      }
+
+      interface Deployment {
+        apiVersion: string;
+        kind: 'Deployment';
+        metadata: { name: string };
+        spec: {
+          replicas: number;
+          template?: {
+            spec?: {
+              containers: Array<{ name: string; image: string }>;
+            };
+          };
+        };
+      }
+
+      // Update the ConfigMap (first document)
+      const { resultParsed: configResult } = updateYaml<ConfigMap>({
+        yamlString,
+        selectDocument: () => 0,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.data,
+            merge: () => ({
+              key: 'updated',
+              another: 'value'
+            })
+          });
+        }
+      });
+
+      expect(configResult.kind).toBe('ConfigMap');
+      expect(configResult.data.key).toBe('updated');
+      expect(configResult.data.another).toBe('value');
+
+      // Update the Deployment (second document)
+      const { resultParsed: deploymentResult } = updateYaml<Deployment>({
+        yamlString,
+        selectDocument: () => 1,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.spec,
+            merge: () => ({
+              replicas: 5
+            })
+          });
+        }
+      });
+
+      expect(deploymentResult.kind).toBe('Deployment');
+      expect(deploymentResult.spec.replicas).toBe(5);
+    });
+
+    it('should select documents dynamically based on content', () => {
+      const yamlString = `---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: database
+spec:
+  port: 5432`;
+
+      interface Service {
+        apiVersion: string;
+        kind: string;
+        metadata: { name: string };
+        spec: { port: number };
+      }
+
+      // Select document based on metadata.name
+      const { result, resultParsed } = updateYaml<Service>({
+        yamlString,
+        selectDocument: (docs) => {
+          // Find the backend service document
+          return docs.findIndex(doc => {
+            const parsed = doc.toJSON() as Service;
+            return parsed.metadata?.name === 'backend';
+          });
+        },
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.spec,
+            merge: () => ({
+              port: 9000,
+              protocol: 'TCP'
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.metadata.name).toBe('backend');
+      expect(resultParsed.spec.port).toBe(9000);
+      expect(result).toContain('port: 9000');
+      expect(result).toContain('protocol: TCP');
+      // Verify other documents unchanged
+      expect(result).toContain('name: frontend');
+      expect(result).toContain('port: 80');
+      expect(result).toContain('name: database');
+      expect(result).toContain('port: 5432');
+    });
+
+    it('should preserve comments in multi-document YAML', () => {
+      const yamlString = `---
+# First document comment
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Name comment
+  name: first-config
+data:
+  key: value
+---
+# Second document comment
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: second-config
+# Data comment
+data:
+  key: value`;
+
+      const { result } = updateYaml({
+        yamlString,
+        selectDocument: () => 1, // Select second document
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed.data,
+            merge: () => ({
+              key: 'updated',
+              newKey: 'added'
+            })
+          });
+        }
+      });
+
+      // Verify comments are preserved in both documents
+      expect(result).toContain('# First document comment');
+      expect(result).toContain('# Name comment');
+      expect(result).toContain('# Second document comment');
+      expect(result).toContain('# Data comment');
+      expect(result).toContain('key: updated');
+      expect(result).toContain('newKey: added');
+    });
+
+    it('should handle empty documents in multi-document YAML', () => {
+      const yamlString = `---
+{}
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: value
+---
+null`;
+
+      interface ConfigMap {
+        apiVersion?: string;
+        kind?: string;
+        data?: { [key: string]: string };
+      }
+
+      // Update the second document (ConfigMap)
+      const { result, resultParsed } = updateYaml<ConfigMap>({
+        yamlString,
+        selectDocument: () => 1,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.data!,
+            merge: () => ({
+              key: 'updated',
+              another: 'value'
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.kind).toBe('ConfigMap');
+      expect(resultParsed.data!.key).toBe('updated');
+      expect(result).toContain('key: updated');
+      expect(result).toContain('another: value');
+      // Verify empty documents are preserved
+      expect(result).toContain('---\n{}');
+      expect(result).toContain('---\nnull');
+    });
+
+    it('should work with default document selection (first document)', () => {
+      const yamlString = `---
+name: first
+value: 1
+---
+name: second
+value: 2`;
+
+      interface Doc {
+        name: string;
+        value: number;
+      }
+
+      // No selectDocument provided - should default to first document
+      const { resultParsed } = updateYaml<Doc>({
+        yamlString,
+        // selectDocument not provided - uses default behavior
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              name: 'updated-first',
+              value: 10
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.name).toBe('updated-first');
+      expect(resultParsed.value).toBe(10);
+    });
+
+    it('should handle single document YAML with selectFirstDocument', () => {
+      const yamlString = `apiVersion: v1
+kind: ConfigMap
+data:
+  key: value`;
+
+      interface ConfigMap {
+        apiVersion: string;
+        kind: string;
+        data: { [key: string]: string };
+      }
+
+      // Using selectFirstDocument on single-document YAML
+      const { result, resultParsed } = updateYaml<ConfigMap>({
+        yamlString,
+        selectDocument: selectFirstDocument,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed.data,
+            merge: () => ({
+              key: 'updated',
+              new: 'added'
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.data.key).toBe('updated');
+      expect(resultParsed.data.new).toBe('added');
+      expect(result).toContain('key: updated');
+      expect(result).toContain('new: added');
+    });
+
+    it('should validate correct type inference with document selection', () => {
+      const yamlString = `---
+stringValue: hello
+numberValue: 42
+---
+arrayValue: [1, 2, 3]
+objectValue:
+  nested: true`;
+
+      interface FirstDoc {
+        stringValue: string;
+        numberValue: number;
+      }
+
+      interface SecondDoc {
+        arrayValue: number[];
+        objectValue: {
+          nested: boolean;
+        };
+      }
+
+      // Test type safety with first document
+      const { resultParsed: first } = updateYaml<FirstDoc>({
+        yamlString,
+        selectDocument: () => 0,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: (original) => ({
+              stringValue: original.stringValue.toUpperCase(), // Type-safe string methods
+              numberValue: original.numberValue * 2 // Type-safe number operations
+            })
+          });
+        }
+      });
+
+      expect(first.stringValue).toBe('HELLO');
+      expect(first.numberValue).toBe(84);
+
+      // Test type safety with second document
+      const { resultParsed: second } = updateYaml<SecondDoc>({
+        yamlString,
+        selectDocument: () => 1,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: (original) => ({
+              arrayValue: [...original.arrayValue, 4], // Type-safe array operations
+              objectValue: {
+                nested: !original.objectValue.nested // Type-safe boolean operations
+              }
+            })
+          });
+        }
+      });
+
+      expect(second.arrayValue).toEqual([1, 2, 3, 4]);
+      expect(second.objectValue.nested).toBe(false);
+    });
+  });
+
+  describe('writing to empty file', () => {
+    it('should write YAML with input as empty string', () => {
+      const yamlString = '      ';
+
+      interface ConfigMap {
+        apiVersion: string;
+        kind: string;
+        data: {
+          key: string;
+        };
+      }
+
+      const { result, resultParsed } = updateYaml<ConfigMap>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              apiVersion: 'v1',
+              kind: 'ConfigMap',
+              data: {
+                key: 'value'
+              }
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.apiVersion).toBe('v1');
+      expect(resultParsed.kind).toBe('ConfigMap');
+      expect(resultParsed.data.key).toBe('value');
+      expect(result).toContain('apiVersion: v1');
+      expect(result).toContain('kind: ConfigMap');
+      expect(result).toContain('data:');
+      expect(result).toContain('key: value');
+    });
+    it('should write YAML with input as empty string and output should be well yaml formatted not json', () => {
+      const yamlString = '';
+
+      interface ConfigMap {
+        items: { name: string; value: string }[];
+        nested: { deep: { value: string } };
+      }
+
+      const { result, resultParsed } = updateYaml<ConfigMap>({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              items: [
+                {
+                  name: 'item1',
+                  value: 'value1'
+                },
+                {
+                  name: 'item2',
+                  value: 'value2'
+                }
+              ],
+              nested: {
+                deep: {
+                  value: 'original'
+                }
+              }
+            })
+          });
+        }
+      });
+
+      expect(result).toBe(`items:
+  - name: item1
+    value: value1
+  - name: item2
+    value: value2
+nested:
+  deep:
+    value: original
+`)
+    });
+
+    it('should create new documents when selectDocument returns index beyond available documents', () => {
+      const yamlString = `---
+first: doc
+---
+second: doc`;
+
+      interface ThirdDoc {
+        third: string;
+        newField: string;
+      }
+
+      // Select document at index 2 (doesn't exist yet - we only have 0 and 1)
+      const { result, resultParsed } = updateYaml<ThirdDoc>({
+        yamlString,
+        selectDocument: () => 2,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              third: 'doc',
+              newField: 'added'
+            })
+          });
+        }
+      });
+
+      // Should have 3 documents now
+      expect(result).toContain('---');
+      expect(result).toContain('first: doc');
+      expect(result).toContain('second: doc');
+      expect(result).toContain('third: doc');
+      expect(result).toContain('newField: added');
+      expect(resultParsed.third).toBe('doc');
+      expect(resultParsed.newField).toBe('added');
+
+      // Count document separators
+      const separatorCount = (result.match(/---/g) || []).length;
+      expect(separatorCount).toBe(3);
+    });
+
+    it('should create new document at index 5 when only 2 documents exist', () => {
+      const yamlString = `---
+first: doc
+---
+second: doc`;
+
+      interface NewDoc {
+        position: number;
+        created: boolean;
+      }
+
+      const { result, resultParsed } = updateYaml<NewDoc>({
+        yamlString,
+        selectDocument: () => 5,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              position: 5,
+              created: true
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.position).toBe(5);
+      expect(resultParsed.created).toBe(true);
+      expect(result).toContain('position: 5');
+      expect(result).toContain('created: true');
+
+      // Should have 6 documents (0-5)
+      const separatorCount = (result.match(/---/g) || []).length;
+      expect(separatorCount).toBe(6);
+    });
+
+    it('should create first document when empty file and selectDocument returns index > 0', () => {
+      const yamlString = '';
+
+      interface NewDoc {
+        created: string;
+      }
+
+      const { result, resultParsed } = updateYaml<NewDoc>({
+        yamlString,
+        selectDocument: () => 2,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed) => parsed,
+            merge: () => ({
+              created: 'at-index-2'
+            })
+          });
+        }
+      });
+
+      expect(resultParsed.created).toBe('at-index-2');
+      expect(result).toContain('created: at-index-2');
+
+      // Should have 3 documents (0, 1, 2)
+      const separatorCount = (result.match(/---/g) || []).length;
+      expect(separatorCount).toBe(3);
     });
   });
 
@@ -2153,6 +3290,1304 @@ spec:
 
       // Verify new property follows same indentation pattern
       expect(result).toContain('  newProp:');
+    });
+  });
+
+  describe('YAML Anchors and Aliases', () => {
+    describe('basic anchor creation and simple alias reference', () => {
+      it('should create anchor and simple alias reference', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'defaults', anchor: 'def' }),
+                defaults: { timeout: 30 },
+                ...addInstructions({ prop: 'service', alias: 'def' }),
+                service: {}
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`defaults: &def
+  timeout: 30
+service: *def
+`)
+      });
+
+      it('should create multiple different anchors', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'db', anchor: 'db-config' }),
+                db: { port: 5432 },
+                ...addInstructions({ prop: 'cache', anchor: 'cache-config' }),
+                cache: { port: 6379 },
+                ...addInstructions({ prop: 'prodDB', alias: 'db-config' }),
+                prodDB: {},
+                ...addInstructions({ prop: 'prodCache', alias: 'cache-config' }),
+                prodCache: {}
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`db: &db-config
+  port: 5432
+cache: &cache-config
+  port: 6379
+prodDB: *db-config
+prodCache: *cache-config
+`)
+      });
+    });
+
+    describe('merge anchor with additional properties', () => {
+      it('should merge anchor with additional properties', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'base', anchor: 'base' }),
+                base: { timeout: 30, retries: 3 },
+                ...addInstructions({ prop: 'prod', mergeAnchor: 'base' }),
+                prod: { host: 'prod.com', timeout: 60 }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`base: &base
+  timeout: 30
+  retries: 3
+prod:
+  <<: *base
+  host: prod.com
+  timeout: 60
+`)
+
+      });
+
+      it('should merge anchor with empty object', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'base', anchor: 'base' }),
+                base: { timeout: 30 },
+                ...addInstructions({ prop: 'derived', mergeAnchor: 'base' }),
+                derived: {}
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`base: &base
+  timeout: 30
+derived:
+  <<: *base
+`)
+      });
+
+      it('should handle multiple services merging from same anchor', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'baseConfig', anchor: 'base' }),
+                baseConfig: {
+                  timeout: 30,
+                  retries: 3,
+                  ssl: true
+                },
+                ...addInstructions({ prop: 'prodConfig', mergeAnchor: 'base' }),
+                prodConfig: {
+                  host: 'prod.example.com',
+                  timeout: 60
+                },
+                ...addInstructions({ prop: 'devConfig', mergeAnchor: 'base' }),
+                devConfig: {
+                  host: 'dev.example.com',
+                  ssl: false
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`baseConfig: &base
+  timeout: 30
+  retries: 3
+  ssl: true
+prodConfig:
+  <<: *base
+  host: prod.example.com
+  timeout: 60
+devConfig:
+  <<: *base
+  host: dev.example.com
+  ssl: false
+`)
+      });
+    });
+
+    describe('combine anchors with existing features', () => {
+      it('should combine anchors with comments', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'defaults',
+                  anchor: 'def',
+                  comment: 'Default config'
+                }),
+                defaults: { timeout: 30 },
+                ...addInstructions({
+                  prop: 'service',
+                  alias: 'def',
+                  comment: 'Service config'
+                }),
+                service: {}
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`# Default config
+defaults: &def
+  timeout: 30
+# Service config
+service: *def
+`)
+      });
+
+      it('should combine anchors with flow style', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'defaults',
+                  anchor: 'defaults',
+                  flow: true
+                }),
+                defaults: {
+                  cpu: '100m',
+                  memory: '128Mi'
+                },
+                ...addInstructions({
+                  prop: 'serviceA',
+                  alias: 'defaults'
+                }),
+                serviceA: {}
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`defaults: &defaults { cpu: 100m, memory: 128Mi }
+serviceA: *defaults
+`);
+      });
+
+      it('should combine anchors with comments and flow style', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'defaults',
+                  anchor: 'defaults',
+                  comment: 'Default configuration',
+                  flow: true
+                }),
+                defaults: {
+                  cpu: '100m',
+                  memory: '128Mi'
+                },
+                ...addInstructions({
+                  prop: 'serviceA',
+                  mergeAnchor: 'defaults',
+                  comment: 'Service A configuration'
+                }),
+                serviceA: {
+                  replicas: 3
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`# Default configuration
+defaults: &defaults { cpu: 100m, memory: 128Mi }
+# Service A configuration
+serviceA:
+  <<: *defaults
+  replicas: 3
+`)
+      });
+    });
+
+    describe('error handling', () => {
+      it('should throw error for undefined anchor in alias', () => {
+        expect(() => {
+          updateYaml({
+            yamlString: '',
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({ prop: 'service', alias: 'undefined' }),
+                  service: {}
+                })
+              });
+            }
+          });
+        }).toThrow("Anchor 'undefined' is not defined");
+      });
+
+      it('should throw error for undefined anchor in mergeAnchor', () => {
+        expect(() => {
+          updateYaml({
+            yamlString: '',
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({ prop: 'service', mergeAnchor: 'nonexistent' }),
+                  service: { host: 'example.com' }
+                })
+              });
+            }
+          });
+        }).toThrow("Anchor 'nonexistent' is not defined");
+      });
+
+      it('should throw error for circular anchor references', () => {
+        expect(() => {
+          updateYaml({
+            yamlString: '',
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({
+                    prop: 'a',
+                    anchor: 'anchor-a',
+                    mergeAnchor: 'anchor-b'
+                  }),
+                  a: { value: 1 },
+                  ...addInstructions({
+                    prop: 'b',
+                    anchor: 'anchor-b',
+                    mergeAnchor: 'anchor-a'
+                  }),
+                  b: { value: 2 }
+                })
+              });
+            }
+          });
+        }).toThrow('Circular anchor reference detected');
+      });
+
+      it('should throw error for invalid anchor name', () => {
+        expect(() => {
+          updateYaml({
+            yamlString: '',
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({ prop: 'config', anchor: 'my anchor' }),
+                  config: { version: '2.0' }
+                })
+              });
+            }
+          });
+        }).toThrow("Invalid anchor name 'my anchor'");
+      });
+
+      it('should throw error for anchor name with special characters', () => {
+        expect(() => {
+          updateYaml({
+            yamlString: '',
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({ prop: 'config', anchor: 'my@anchor' }),
+                  config: { version: '2.0' }
+                })
+              });
+            }
+          });
+        }).toThrow('Anchor names must match [a-zA-Z0-9_-]+');
+      });
+    });
+
+    describe('preserve existing anchors', () => {
+      it('should preserve existing anchors from source YAML', () => {
+        const yamlString = `defaults: &defaults
+  timeout: 30
+
+serviceA:
+  <<: *defaults
+  host: a.com
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'serviceB', mergeAnchor: 'defaults' }),
+                serviceB: { host: 'b.com' }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`defaults: &defaults
+  timeout: 30
+
+serviceA:
+  <<: *defaults
+  host: a.com
+serviceB:
+  <<: *defaults
+  host: b.com
+`)
+      });
+
+      it('should use existing anchor without redefining', () => {
+        const yamlString = `base: &base-config
+  port: 8080
+  ssl: true
+
+service1:
+  <<: *base-config
+  name: svc1
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({ prop: 'service2', mergeAnchor: 'base-config' }),
+                service2: { name: 'svc2', ssl: false }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`base: &base-config
+  port: 8080
+  ssl: true
+
+service1:
+  <<: *base-config
+  name: svc1
+service2:
+  <<: *base-config
+  name: svc2
+  ssl: false
+`)
+      });
+    });
+
+    describe('real-world examples', () => {
+      it('should handle Kubernetes-style resource sharing', () => {
+        interface K8sDeployment {
+          apiVersion: string;
+          kind: string;
+          _resourceDefaults?: any;
+          _securityDefaults?: any;
+          spec: {
+            template: {
+              spec: {
+                containers: Array<{
+                  name: string;
+                  resources?: any;
+                  securityContext?: any;
+                }>;
+              };
+            };
+          };
+        }
+
+        const { result } = updateYaml<K8sDeployment>({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed) => parsed,
+              merge: () => ({
+                apiVersion: 'apps/v1',
+                kind: 'Deployment',
+                ...addInstructions({
+                  prop: '_resourceDefaults',
+                  anchor: 'default-resources',
+                  comment: 'Shared resource configuration'
+                }),
+                _resourceDefaults: {
+                  limits: { cpu: '200m', memory: '256Mi' },
+                  requests: { cpu: '100m', memory: '128Mi' }
+                },
+                ...addInstructions({
+                  prop: '_securityDefaults',
+                  anchor: 'security-ctx',
+                  comment: 'Shared security context'
+                }),
+                _securityDefaults: {
+                  runAsNonRoot: true,
+                  runAsUser: 1000
+                },
+                spec: {
+                  template: {
+                    spec: {
+                      containers: [
+                        {
+                          name: 'app',
+                          ...addInstructions({
+                            prop: 'resources',
+                            alias: 'default-resources'
+                          }),
+                          resources: {},
+                          ...addInstructions({
+                            prop: 'securityContext',
+                            alias: 'security-ctx'
+                          }),
+                          securityContext: {}
+                        },
+                        {
+                          name: 'sidecar',
+                          ...addInstructions({
+                            prop: 'resources',
+                            mergeAnchor: 'default-resources'
+                          }),
+                          resources: {
+                            limits: { cpu: '50m' }
+                          },
+                          ...addInstructions({
+                            prop: 'securityContext',
+                            alias: 'security-ctx'
+                          }),
+                          securityContext: {}
+                        }
+                      ]
+                    }
+                  }
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`# Shared resource configuration
+_resourceDefaults: &default-resources
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+# Shared security context
+_securityDefaults: &security-ctx
+  runAsNonRoot: true
+  runAsUser: 1000
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          resources: *default-resources
+          securityContext: *security-ctx
+        - name: sidecar
+          resources:
+            <<: *default-resources
+            limits:
+              cpu: 50m
+          securityContext: *security-ctx
+`)
+      });
+
+      it('should handle Helm values-style configuration', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'imageDefaults',
+                  anchor: 'image-defaults',
+                  comment: 'Default image configuration',
+                  flow: true
+                }),
+                imageDefaults: {
+                  pullPolicy: 'IfNotPresent',
+                  pullSecrets: ['regcred']
+                },
+                ...addInstructions({
+                  prop: 'resourceDefaults',
+                  anchor: 'resource-defaults',
+                  comment: 'Default resource limits'
+                }),
+                resourceDefaults: {
+                  limits: { cpu: '200m', memory: '256Mi' },
+                  requests: { cpu: '100m', memory: '128Mi' }
+                },
+                frontend: {
+                  replicaCount: 3,
+                  ...addInstructions({
+                    prop: 'image',
+                    mergeAnchor: 'image-defaults'
+                  }),
+                  image: {
+                    repository: 'myapp/frontend',
+                    tag: '1.0.0'
+                  },
+                  ...addInstructions({
+                    prop: 'resources',
+                    alias: 'resource-defaults'
+                  }),
+                  resources: {}
+                },
+                backend: {
+                  replicaCount: 5,
+                  ...addInstructions({
+                    prop: 'image',
+                    mergeAnchor: 'image-defaults'
+                  }),
+                  image: {
+                    repository: 'myapp/backend',
+                    tag: '2.0.0'
+                  },
+                  ...addInstructions({
+                    prop: 'resources',
+                    mergeAnchor: 'resource-defaults'
+                  }),
+                  resources: {
+                    limits: { cpu: '500m' }
+                  }
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`# Default image configuration
+imageDefaults: &image-defaults { pullPolicy: IfNotPresent, pullSecrets: [ regcred ] }
+# Default resource limits
+resourceDefaults: &resource-defaults
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+frontend:
+  image:
+    <<: *image-defaults
+    repository: myapp/frontend
+    tag: 1.0.0
+  resources: *resource-defaults
+  replicaCount: 3
+backend:
+  image:
+    <<: *image-defaults
+    repository: myapp/backend
+    tag: 2.0.0
+  resources:
+    <<: *resource-defaults
+    limits:
+      cpu: 500m
+  replicaCount: 5
+`)
+      });
+    });
+  });
+
+  describe('YAML Anchors and Aliases', () => {
+    describe('array item anchors and aliases', () => {
+      it('should create anchors on array items', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'templates',
+                  anchors: { 0: 'empty', 1: 'basic' }
+                }),
+                templates: [{}, { type: 'basic' }],
+                ...addInstructions({
+                  prop: 'instances',
+                  aliases: ['empty', 'basic']
+                }),
+                instances: [{}, {}]
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`templates:
+  - &empty {}
+  - &basic
+    type: basic
+instances:
+  - *empty
+  - *basic
+`)
+      });
+
+      it('should handle multiple array item aliases', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'templates',
+                  anchors: {
+                    0: 'empty-template',
+                    1: 'basic-template'
+                  }
+                }),
+                templates: [
+                  {},
+                  { type: 'basic', timeout: 30 }
+                ],
+                ...addInstructions({
+                  prop: 'instances',
+                  aliases: ['empty-template', 'basic-template', 'empty-template']
+                }),
+                instances: [{}, {}, {}]
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`templates:
+  - &empty-template {}
+  - &basic-template
+    type: basic
+    timeout: 30
+instances:
+  - *empty-template
+  - *basic-template
+  - *empty-template
+`)
+      });
+    });
+
+    describe('anchor renaming', () => {
+      it('should rename anchor and update all references', () => {
+        const yamlString = `defaults: &resource-defaults
+  cpu: 100m
+  memory: 128Mi
+
+frontend:
+  resources: *resource-defaults
+
+backend:
+  resources: *resource-defaults
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'defaults',
+                  anchor: 'resource-defaults-v2',
+                  renameFrom: 'resource-defaults'
+                }),
+                defaults: {
+                  cpu: '100m',
+                  memory: '128Mi'
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`defaults: &resource-defaults-v2
+  cpu: 100m
+  memory: 128Mi
+
+frontend:
+  resources: *resource-defaults-v2
+
+backend:
+  resources: *resource-defaults-v2
+`);
+      });
+
+      it('should rename anchor used in merge keys', () => {
+        const yamlString = `baseConfig: &base
+  timeout: 30
+  retries: 3
+
+prodConfig:
+  <<: *base
+  host: prod.com
+
+devConfig:
+  <<: *base
+  host: dev.com
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'baseConfig',
+                  anchor: 'base-v2',
+                  renameFrom: 'base'
+                }),
+                baseConfig: {
+                  timeout: 30,
+                  retries: 3
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`baseConfig: &base-v2
+  timeout: 30
+  retries: 3
+
+prodConfig:
+  <<: *base-v2
+  host: prod.com
+
+devConfig:
+  <<: *base-v2
+  host: dev.com
+`);
+      });
+
+      it('should rename anchor with mixed alias types', () => {
+        const yamlString = `defaults: &def
+  cpu: 100m
+
+service1:
+  resources: *def
+
+service2:
+  resources:
+    <<: *def
+    cpu: 200m
+
+service3:
+  resources: *def
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'defaults',
+                  anchor: 'defaults-v2',
+                  renameFrom: 'def'
+                }),
+                defaults: {
+                  cpu: '100m'
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`defaults: &defaults-v2
+  cpu: 100m
+
+service1:
+  resources: *defaults-v2
+
+service2:
+  resources:
+    <<: *defaults-v2
+    cpu: 200m
+
+service3:
+  resources: *defaults-v2
+`);
+      });
+
+      it('should handle renameFrom when anchor does not exist (no-op)', () => {
+        const yamlString = `config:
+  timeout: 30
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'config',
+                  anchor: 'new-anchor',
+                  renameFrom: 'nonexistent'  // Doesn't exist, should just create new anchor
+                }),
+                config: {
+                  timeout: 30
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`config: &new-anchor
+  timeout: 30
+`);
+      });
+
+      it('should throw error if target anchor name already exists', () => {
+        const yamlString = `defaults: &old-name
+  cpu: 100m
+
+other: &new-name
+  memory: 128Mi
+`;
+
+        expect(() => {
+          updateYaml({
+            yamlString,
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({
+                    prop: 'defaults',
+                    anchor: 'new-name',  // Already exists!
+                    renameFrom: 'old-name'
+                  }),
+                  defaults: {
+                    cpu: '100m'
+                  }
+                })
+              });
+            }
+          });
+        }).toThrow("Anchor 'new-name' already exists");
+      });
+
+      it('should rename anchor from different property location', () => {
+        const yamlString = `sharedDefaults: &resource-defaults
+  cpu: 100m
+  memory: 128Mi
+
+service1:
+  resources: *resource-defaults
+
+service2:
+  resources: *resource-defaults
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                // Rename happens via a NEW property, not the original anchor location
+                ...addInstructions({
+                  prop: 'newDefaults',
+                  anchor: 'resource-defaults-v2',
+                  renameFrom: 'resource-defaults'
+                }),
+                newDefaults: {
+                  cpu: '200m',
+                  memory: '256Mi'
+                }
+              })
+            });
+          }
+        });
+
+        // Original anchor renamed, and new property gets the new anchor too
+        expect(result).toBe(`sharedDefaults: &resource-defaults-v2
+  cpu: 100m
+  memory: 128Mi
+
+service1:
+  resources: *resource-defaults-v2
+
+service2:
+  resources: *resource-defaults-v2
+newDefaults: &resource-defaults-v2
+  cpu: 200m
+  memory: 256Mi
+`);
+      });
+
+      it('should validate new anchor name when renaming', () => {
+        const yamlString = `defaults: &old-name
+  cpu: 100m
+`;
+
+        expect(() => {
+          updateYaml({
+            yamlString,
+            annotate: ({ change }) => {
+              change({
+                findKey: (parsed: any) => parsed,
+                merge: () => ({
+                  ...addInstructions({
+                    prop: 'defaults',
+                    anchor: 'invalid name with spaces',
+                    renameFrom: 'old-name'
+                  }),
+                  defaults: {
+                    cpu: '100m'
+                  }
+                })
+              });
+            }
+          });
+        }).toThrow("Invalid anchor name 'invalid name with spaces'");
+      });
+    });
+
+    describe('schema-level instructions', () => {
+      it('should apply anchor instructions from schema', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          schema: {
+            properties: {
+              server: {
+                anchor: 'server-config',
+                comment: 'Server settings'
+              },
+              database: {
+                mergeAnchor: 'server-config'
+              }
+            }
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                server: { host: 'localhost', port: 8080 },
+                database: { timeout: 30 }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`# Server settings
+server: &server-config
+  host: localhost
+  port: 8080
+database:
+  <<: *server-config
+  timeout: 30
+`);
+      });
+
+      it('should handle nested properties in schema', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          schema: {
+            properties: {
+              config: {
+                properties: {
+                  server: {
+                    anchor: 'srv',
+                    properties: {
+                      host: { commentBefore: 'Production host' }
+                    }
+                  },
+                  client: {
+                    alias: 'srv'
+                  }
+                }
+              }
+            }
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                config: {
+                  server: { host: 'localhost', port: 8080 },
+                  client: {}
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`config:
+  server: &srv
+    # Production host
+    host: localhost
+    port: 8080
+  client: *srv
+`);
+      });
+
+      it('should handle array item instructions in schema', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          schema: {
+            properties: {
+              items: {
+                type: 'array',
+                items: [
+                  { anchor: 'first-item' },
+                  { alias: 'first-item' },
+                  { alias: 'first-item' }
+                ]
+              }
+            }
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                items: [
+                  { name: 'prod', env: 'production' },
+                  { extra: 'field' },
+                  { another: 'value' }
+                ]
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`items:
+  - &first-item
+    name: prod
+    env: production
+  - *first-item
+  - *first-item
+`);
+      });
+
+      it('should give priority to addInstructions over schema', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          schema: {
+            properties: {
+              server: {
+                anchor: 'server-config',
+                comment: 'From schema'
+              },
+              database: {
+                comment: 'Database from schema'
+              }
+            }
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                ...addInstructions({
+                  prop: 'server',
+                  anchor: 'override-anchor',
+                  comment: 'From addInstructions'
+                }),
+                ...addInstructions({
+                  prop: 'database',
+                  mergeAnchor: 'override-anchor'
+                }),
+                server: { host: 'localhost', port: 8080 },
+                database: { timeout: 30 }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`# From addInstructions
+server: &override-anchor
+  host: localhost
+  port: 8080
+database:
+  <<: *override-anchor
+  timeout: 30
+`);
+      });
+
+      it('should handle mergeAnchor in schema with multiple targets', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          schema: {
+            properties: {
+              defaults: {
+                anchor: 'base-config'
+              },
+              apiConfig: {
+                mergeAnchor: 'base-config'
+              },
+              workerConfig: {
+                mergeAnchor: 'base-config'
+              }
+            }
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                defaults: { timeout: 30, retries: 3 },
+                apiConfig: { port: 8080 },
+                workerConfig: { threads: 4 }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`defaults: &base-config
+  timeout: 30
+  retries: 3
+apiConfig:
+  <<: *base-config
+  port: 8080
+workerConfig:
+  <<: *base-config
+  threads: 4
+`);
+      });
+
+      it('should handle flow formatting in schema', () => {
+        const { result } = updateYaml({
+          yamlString: '',
+          schema: {
+            properties: {
+              metadata: {
+                properties: {
+                  labels: { flow: true }
+                }
+              }
+            }
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (parsed: any) => parsed,
+              merge: () => ({
+                metadata: {
+                  labels: { app: 'myapp', env: 'prod' }
+                }
+              })
+            });
+          }
+        });
+
+        expect(result).toBe(`metadata:
+  labels: { app: myapp, env: prod }
+`);
+      });
+    });
+  });
+
+  describe('defaultFlow parameter', () => {
+    it('should use block style for arrays when defaultFlow is false', () => {
+      const yamlString = `apiVersion: v1
+kind: Kustomization`;
+
+      const { result } = updateYaml({
+        yamlString,
+        defaultFlow: false,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj) => obj,
+            merge: () => ({
+              apiVersion: 'kustomize.config.k8s.io/v1beta1',
+              kind: 'Kustomization',
+              resources: ['../../base', '../other']
+            })
+          });
+        }
+      });
+
+      // Should use block style (- item) not flow style ([item])
+      expect(result).toContain('resources:');
+      expect(result).toContain('  - ../../base');
+      expect(result).toContain('  - ../other');
+      expect(result).not.toContain('resources: [');
+      expect(result).not.toContain('resources: [ ');
+    });
+
+    it('should use flow style for arrays when defaultFlow is true', () => {
+      const yamlString = `apiVersion: v1
+kind: Kustomization`;
+
+      const { result } = updateYaml({
+        yamlString,
+        defaultFlow: true,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj) => obj,
+            merge: () => ({
+              apiVersion: 'kustomize.config.k8s.io/v1beta1',
+              kind: 'Kustomization',
+              resources: ['../../base']
+            })
+          });
+        }
+      });
+
+      // Should use flow style ([item])
+      expect(result).toContain('resources: [');
+    });
+
+    it('should apply defaultFlow to empty files', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        defaultFlow: false,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj) => obj,
+            merge: () => ({
+              apiVersion: 'kustomize.config.k8s.io/v1beta1',
+              kind: 'Kustomization',
+              resources: ['../../base']
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('resources:');
+      expect(result).toContain('  - ../../base');
+      expect(result).not.toContain('resources: [');
     });
   });
 });

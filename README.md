@@ -44,6 +44,12 @@ console.log(result);
 - **Type-Safe**: Full TypeScript support with generic type parameters
 - **Comment Preservation**: Automatically preserves existing YAML comments
 - **Comment Manipulation**: Add, remove, or update comments programmatically
+- **YAML Anchors & Aliases**: Create reusable content with anchors, aliases, and merge keys
+- **Anchor Renaming**: Rename anchors and update all references document-wide
+- **Schema-Level Instructions**: Define structure metadata separately from data (OpenAPI-style)
+- **YAML vs JSON Formatting**: Control output format with `flow` and `flowItems` instructions
+- **Per-Item Array Formatting**: Format each array item as JSON or YAML individually
+- **Empty File Support**: Handle empty YAML strings gracefully
 - **Multi-Document Support**: Handle YAML files with multiple documents
 - **Immutable**: Original YAML strings are never modified
 - **Advanced Array Merging**: Multiple strategies for merging arrays
@@ -62,9 +68,39 @@ Updates a YAML string immutably with type safety and comment preservation.
 interface UpdateYamlOptions<T> {
   yamlString: string;
   selectDocument?: (yamlDocuments: Document[]) => number;
+  schema?: YAMLSchema;  // Optional schema-level instructions
   annotate?: (annotator: {
     change: <L>(options: ChangeOptions<T, L>) => void;
   }) => void;
+}
+
+interface YAMLSchema {
+  properties?: Record<string, SchemaProperty>;
+}
+
+interface SchemaProperty {
+  // Comment instructions
+  comment?: string;
+  commentBefore?: string;
+  commentAfter?: string;
+  removeComment?: boolean;
+
+  // Formatting instructions
+  flow?: boolean;
+  flowItems?: boolean[];
+
+  // Anchor instructions
+  anchor?: string;
+  renameFrom?: string;
+  alias?: string;
+  mergeAnchor?: string;
+  anchors?: Record<number, string>;
+  aliases?: string[];
+
+  // Nested structure
+  type?: 'array';
+  properties?: Record<string, SchemaProperty>;
+  items?: SchemaProperty[];
 }
 ```
 
@@ -186,11 +222,37 @@ const { result } = updateYaml({
 });
 ```
 
-### Using `addInstructions` for Comments
+### Using `addInstructions`
+
+The `addInstructions` helper provides advanced control over properties including comments, merge strategies, and formatting:
 
 ```typescript
 import { updateYaml, addInstructions } from '@hiscojs/yaml-updater';
 
+// Available options:
+addInstructions({
+  prop: 'propertyName',           // Property to apply instructions to
+
+  // Comment options:
+  comment: 'Comment text',        // Add comment above the property
+  removeComment: true,            // Remove existing comment
+  commentBefore: 'Text',          // Alternative to comment
+  commentAfter: 'Text',           // Add comment after (limited support)
+
+  // Array merge strategies:
+  mergeByContents: true,          // Deduplicate by deep equality
+  mergeByName: true,              // Merge by 'name' property
+  mergeByProp: 'customProp',      // Merge by custom property
+  deepMerge: true,                // Deep merge nested objects
+
+  // Formatting options (YAML-specific):
+  flow: true,                     // true = JSON format, false = YAML format
+  flowItems: [true, false, true]  // Per-item format for arrays
+})
+```
+
+**Example with comments:**
+```typescript
 const { result } = updateYaml({
   yamlString,
   annotate: ({ change }) => {
@@ -650,6 +712,499 @@ const { result } = updateYaml({
 });
 ```
 
+## YAML Anchors and Aliases
+
+YAML anchors (`&anchor-name`) and aliases (`*anchor-name`) allow you to reuse content across your YAML document, reducing duplication and ensuring consistency.
+
+### Basic Anchor and Alias
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'defaults',
+          anchor: 'default-config'
+        }),
+        defaults: {
+          timeout: 30,
+          retries: 3
+        },
+        ...addInstructions({
+          prop: 'production',
+          alias: 'default-config'
+        }),
+        production: {}
+      })
+    });
+  }
+});
+
+// Output:
+// defaults: &default-config
+//   timeout: 30
+//   retries: 3
+// production: *default-config
+```
+
+### Merge Keys - Extend and Override
+
+Use `mergeAnchor` to inherit properties from an anchor while adding or overriding specific values:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'defaults',
+          anchor: 'base-config'
+        }),
+        defaults: {
+          timeout: 30,
+          retries: 3,
+          logLevel: 'info'
+        },
+        ...addInstructions({
+          prop: 'production',
+          mergeAnchor: 'base-config'
+        }),
+        production: {
+          logLevel: 'error',    // Override
+          monitoring: true      // Add new
+        }
+      })
+    });
+  }
+});
+
+// Output:
+// defaults: &base-config
+//   timeout: 30
+//   retries: 3
+//   logLevel: info
+// production:
+//   <<: *base-config
+//   logLevel: error
+//   monitoring: true
+```
+
+### Array Item Anchors and Aliases
+
+Apply anchors and aliases to specific array items:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'environments',
+          anchors: { 0: 'prod-env' },
+          aliases: [undefined, 'prod-env', 'prod-env']
+        }),
+        environments: [
+          { name: 'production', cpu: '1000m', memory: '2Gi' },
+          { name: 'staging' },
+          { name: 'qa' }
+        ]
+      })
+    });
+  }
+});
+
+// Output:
+// environments:
+//   - &prod-env
+//     name: production
+//     cpu: 1000m
+//     memory: 2Gi
+//   - *prod-env
+//   - *prod-env
+```
+
+### Renaming Anchors
+
+Rename an anchor and automatically update all references throughout the document:
+
+```typescript
+const yamlString = `
+defaults: &old-name
+  timeout: 30
+api:
+  <<: *old-name
+worker:
+  <<: *old-name
+`;
+
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'defaults',
+          anchor: 'new-name',
+          renameFrom: 'old-name'
+        })
+      })
+    });
+  }
+});
+
+// Output:
+// defaults: &new-name
+//   timeout: 30
+// api:
+//   <<: *new-name
+// worker:
+//   <<: *new-name
+```
+
+### Schema-Level Instructions
+
+For complex documents, define instructions at the schema level instead of inline. This separates formatting concerns (anchors, comments, flow style) from data structure.
+
+**Key Concept**: The YAML updater schema defines **how to format** your YAML (anchors, comments, styling), while your OpenAPI schema defines **what the data structure is** (types, validation). These are complementary but separate concerns.
+
+**When to use schema-level instructions:**
+- You have a consistent structure that needs the same formatting applied repeatedly
+- You're working with OpenAPI/JSON Schema and want to layer formatting on top
+- You want to reuse formatting rules across multiple `updateYaml` calls
+- You need to maintain separation between data structure (OpenAPI) and presentation (YAML formatting)
+
+**Basic Example:**
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  schema: {
+    properties: {
+      server: {
+        anchor: 'server-config',
+        comment: 'Server configuration',
+        properties: {
+          host: { commentBefore: 'Production host' }
+        }
+      },
+      database: {
+        mergeAnchor: 'server-config',
+        comment: 'Database inherits server config'
+      },
+      cache: {
+        mergeAnchor: 'server-config'
+      }
+    }
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        server: { host: 'localhost', port: 8080 },
+        database: { dbName: 'myapp' },
+        cache: { ttl: 3600 }
+      })
+    });
+  }
+});
+
+// Output:
+// # Server configuration
+// server: &server-config
+//   # Production host
+//   host: localhost
+//   port: 8080
+// # Database inherits server config
+// database:
+//   <<: *server-config
+//   dbName: myapp
+// cache:
+//   <<: *server-config
+//   ttl: 3600
+```
+
+**Schema for Array Items:**
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  schema: {
+    properties: {
+      templates: {
+        type: 'array',
+        items: [
+          { anchor: 'template-1', comment: 'First template' },
+          { anchor: 'template-2' }
+        ]
+      },
+      instances: {
+        type: 'array',
+        items: [
+          { alias: 'template-1' },
+          { alias: 'template-2' },
+          { alias: 'template-1' }
+        ]
+      }
+    }
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        templates: [
+          { name: 'basic', timeout: 30 },
+          { name: 'advanced', timeout: 60 }
+        ],
+        instances: [{}, {}, {}]
+      })
+    });
+  }
+});
+
+// Output:
+// templates:
+//   # First template
+//   - &template-1
+//     name: basic
+//     timeout: 30
+//   - &template-2
+//     name: advanced
+//     timeout: 60
+// instances:
+//   - *template-1
+//   - *template-2
+//   - *template-1
+```
+
+**Priority: Inline `addInstructions` overrides schema:**
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  schema: {
+    properties: {
+      server: {
+        anchor: 'server-config',
+        comment: 'From schema'
+      }
+    }
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'server',
+          anchor: 'override-anchor',
+          comment: 'From addInstructions'  // This takes priority
+        }),
+        server: { host: 'localhost' }
+      })
+    });
+  }
+});
+
+// Output:
+// # From addInstructions
+// server: &override-anchor
+//   host: localhost
+```
+
+### Real-World Example: Kubernetes Resource Sharing
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  schema: {
+    properties: {
+      resourceDefaults: {
+        anchor: 'default-resources',
+        comment: 'Default resource limits'
+      },
+      frontend: {
+        properties: {
+          resources: { mergeAnchor: 'default-resources' }
+        }
+      },
+      backend: {
+        properties: {
+          resources: { mergeAnchor: 'default-resources' }
+        }
+      },
+      worker: {
+        properties: {
+          resources: { mergeAnchor: 'default-resources' }
+        }
+      }
+    }
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed: any) => parsed,
+      merge: () => ({
+        resourceDefaults: {
+          limits: { cpu: '500m', memory: '512Mi' },
+          requests: { cpu: '100m', memory: '128Mi' }
+        },
+        frontend: {
+          replicas: 3,
+          resources: { limits: { cpu: '1000m' } }  // Override CPU
+        },
+        backend: {
+          replicas: 2,
+          resources: {}  // Use defaults
+        },
+        worker: {
+          replicas: 5,
+          resources: { requests: { memory: '256Mi' } }  // Override memory
+        }
+      })
+    });
+  }
+});
+
+// Output:
+// # Default resource limits
+// resourceDefaults: &default-resources
+//   limits:
+//     cpu: 500m
+//     memory: 512Mi
+//   requests:
+//     cpu: 100m
+//     memory: 128Mi
+// frontend:
+//   replicas: 3
+//   resources:
+//     <<: *default-resources
+//     limits:
+//       cpu: 1000m
+// backend:
+//   replicas: 2
+//   resources:
+//     <<: *default-resources
+// worker:
+//   replicas: 5
+//   resources:
+//     <<: *default-resources
+//     requests:
+//       memory: 256Mi
+```
+
+### Using with OpenAPI/JSON Schema
+
+If you already have an OpenAPI specification or JSON Schema defining your data structure, you can create a complementary YAML updater schema to define formatting:
+
+```typescript
+// Your OpenAPI spec defines the data structure
+const openApiSpec = {
+  components: {
+    schemas: {
+      ServerConfig: {
+        type: 'object',
+        properties: {
+          host: { type: 'string' },
+          port: { type: 'number' },
+          timeout: { type: 'number' }
+        }
+      }
+    }
+  }
+};
+
+// YAML updater schema defines the formatting (separate concern)
+const yamlFormattingSchema = {
+  properties: {
+    defaultServer: {
+      anchor: 'server-config',
+      comment: 'Default server configuration'
+    },
+    productionServer: {
+      mergeAnchor: 'server-config',
+      comment: 'Production overrides defaults'
+    },
+    stagingServer: {
+      mergeAnchor: 'server-config',
+      comment: 'Staging overrides defaults'
+    }
+  }
+};
+
+// Use both together
+const { result } = updateYaml({
+  yamlString,
+  schema: yamlFormattingSchema,  // How to format
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        // Data validated against OpenAPI schema
+        defaultServer: { host: 'localhost', port: 8080, timeout: 30 },
+        productionServer: { host: 'prod.example.com', timeout: 60 },
+        stagingServer: { host: 'staging.example.com' }
+      })
+    });
+  }
+});
+
+// Output:
+// # Default server configuration
+// defaultServer: &server-config
+//   host: localhost
+//   port: 8080
+//   timeout: 30
+// # Production overrides defaults
+// productionServer:
+//   <<: *server-config
+//   host: prod.example.com
+//   timeout: 60
+// # Staging overrides defaults
+// stagingServer:
+//   <<: *server-config
+//   host: staging.example.com
+```
+
+**Benefits of this approach:**
+- **Separation of concerns**: OpenAPI defines structure/types, YAML schema defines formatting
+- **Reusability**: Define formatting schema once, reuse across multiple updates
+- **Validation + Presentation**: Combine OpenAPI validation with YAML formatting
+- **Maintainability**: Changes to data structure (OpenAPI) don't affect formatting rules
+
+### Anchor Instructions Reference
+
+All anchor-related options in `addInstructions`:
+
+```typescript
+addInstructions({
+  prop: 'propertyName',
+
+  // Create an anchor on this property
+  anchor: 'anchor-name',
+
+  // Rename existing anchor globally (use with anchor)
+  renameFrom: 'old-anchor-name',
+
+  // Create simple alias (replaces entire value)
+  alias: 'anchor-name',
+
+  // Merge with anchor (allows overrides)
+  mergeAnchor: 'anchor-name',
+
+  // Anchors for array items (by index)
+  anchors: { 0: 'first-item', 2: 'third-item' },
+
+  // Aliases for array items (by position)
+  aliases: ['anchor-1', 'anchor-2', 'anchor-1']
+})
+```
+
 ## Advanced Features
 
 ### Multiple Changes
@@ -798,6 +1353,240 @@ const { result } = updateYaml({
 // database:
 //   host: localhost
 //   port: 5432
+```
+
+## YAML vs JSON Formatting
+
+### Control Output Format with `flow` Instruction
+
+The `flow` instruction allows you to control whether properties are formatted as JSON (flow style) or YAML (block style):
+
+```typescript
+import { updateYaml, addInstructions } from '@hiscojs/yaml-updater';
+
+const yamlString = `
+config:
+  name: myapp
+`;
+
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed.config,
+      merge: () => ({
+        name: 'myapp',
+        // YAML block style (default)
+        ...addInstructions({
+          prop: 'settings',
+          flow: false
+        }),
+        settings: {
+          debug: true,
+          timeout: 30
+        },
+        // JSON flow style
+        ...addInstructions({
+          prop: 'metadata',
+          flow: true
+        }),
+        metadata: { version: '1.0', env: 'prod' },
+        // JSON flow style for arrays
+        ...addInstructions({
+          prop: 'tags',
+          flow: true
+        }),
+        tags: ['tag1', 'tag2', 'tag3']
+      })
+    });
+  }
+});
+
+// Output:
+// config:
+//   name: myapp
+//   settings:           # YAML block style (multi-line)
+//     debug: true
+//     timeout: 30
+//   metadata: { version: "1.0", env: prod }  # JSON flow style (single-line)
+//   tags: [ tag1, tag2, tag3 ]               # JSON flow style (single-line)
+```
+
+### Control Individual Array Items with `flowItems`
+
+For fine-grained control, use `flowItems` to specify the format of each array item individually:
+
+```typescript
+const yamlString = `
+items: []
+`;
+
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'items',
+          flowItems: [true, false, true]  // First: JSON, Second: YAML, Third: JSON
+        }),
+        items: [
+          { id: 1, name: 'first' },
+          { id: 2, name: 'second' },
+          { id: 3, name: 'third' }
+        ]
+      })
+    });
+  }
+});
+
+// Output:
+// items:
+//   - { id: 1, name: first }   # JSON format
+//   - id: 2                     # YAML format
+//     name: second
+//   - { id: 3, name: third }    # JSON format
+```
+
+### Mixed JSON and YAML Example
+
+```typescript
+const { result } = updateYaml({
+  yamlString: 'jsons: []',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'jsons',
+          flowItems: [true, false]  // First: JSON, Second: YAML
+        }),
+        jsons: [
+          {},           // Empty object in JSON
+          { key: 1 }    // Object with data in YAML
+        ]
+      })
+    });
+  }
+});
+
+// Output:
+// jsons:
+//   - {}          # JSON format (compact)
+//   - key: 1      # YAML format (expanded)
+```
+
+### When to Use Flow vs Block Style
+
+**Use Flow Style (JSON) when:**
+- Properties have simple, short values
+- You want compact, single-line formatting
+- The property contains metadata or configuration that benefits from being compact
+- Empty objects or simple arrays
+
+**Use Block Style (YAML) when:**
+- Properties have complex nested structures
+- You want readable, multi-line formatting
+- The property contains important configuration that should be easy to read
+- Large objects or arrays with many items
+
+### Combining `flow` with Comments
+
+```typescript
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed.config,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'metadata',
+          comment: 'Compact JSON metadata',
+          flow: true
+        }),
+        metadata: { version: '1.0', env: 'prod' },
+        ...addInstructions({
+          prop: 'settings',
+          comment: 'Detailed YAML settings',
+          flow: false
+        }),
+        settings: {
+          debug: true,
+          timeout: 30
+        }
+      })
+    });
+  }
+});
+
+// Output:
+// config:
+//   # Compact JSON metadata
+//   metadata: { version: "1.0", env: prod }
+//   # Detailed YAML settings
+//   settings:
+//     debug: true
+//     timeout: 30
+```
+
+## Writing to Empty Files
+
+The library handles empty YAML strings gracefully, treating them as empty objects:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',  // Empty string
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        apiVersion: 'v1',
+        kind: 'ConfigMap',
+        data: {
+          key: 'value'
+        }
+      })
+    });
+  }
+});
+
+// Output:
+// apiVersion: v1
+// kind: ConfigMap
+// data:
+//   key: value
+```
+
+## Comment Placement
+
+Comments are always placed **above** the property they describe:
+
+```typescript
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'data',
+          comment: 'Configuration data'
+        }),
+        data: {
+          database: 'localhost',
+          cache: 'redis'
+        }
+      })
+    });
+  }
+});
+
+// Output:
+// # Configuration data
+// data:
+//   database: localhost
+//   cache: redis
 ```
 
 ## Best Practices

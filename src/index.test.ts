@@ -1,5 +1,6 @@
 import { updateYaml, addInstructions, selectFirstDocument } from './index';
 import { describe, it, expect } from '@jest/globals';
+import { stringify } from 'yaml';
 
 // Common type definitions for tests
 interface ConfigMapData {
@@ -2361,6 +2362,450 @@ root:
     });
   });
 
+  describe('inline comments (commentAfter)', () => {
+    it('should add inline comment using addInstructions with commentAfter', () => {
+      const yamlString = `apiVersion: v1
+kind: ConfigMap`;
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              apiVersion: 'v1',
+              kind: 'ConfigMap',
+              ...addInstructions({
+                prop: 'enabled',
+                commentAfter: 'can change whether this is deployed'
+              }),
+              enabled: null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled: # can change whether this is deployed');
+      expect(result).not.toContain('enabled: null');
+    });
+
+    it('should add inline comments to nested properties', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              charts: {
+                ...addInstructions({
+                  prop: 'sealedSecrets',
+                  commentAfter: 'SealedSecrets chart configuration'
+                }),
+                sealedSecrets: {
+                  ...addInstructions({
+                    prop: 'enabled',
+                    commentAfter: 'toggle chart deployment'
+                  }),
+                  enabled: null
+                }
+              }
+            })
+          });
+        }
+      });
+
+      // Note: When a property has an object value (not null/scalar),
+      // the inline comment appears as a block comment at the start of the object content
+      expect(result).toContain('# SealedSecrets chart configuration');
+      expect(result).toContain('enabled: # toggle chart deployment');
+    });
+
+    it('should support inline comments with non-null values', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'replicas',
+                commentAfter: 'number of replicas'
+              }),
+              replicas: 3,
+              ...addInstructions({
+                prop: 'name',
+                commentAfter: 'service name'
+              }),
+              name: 'myapp'
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('replicas: 3 # number of replicas');
+      expect(result).toContain('name: myapp # service name');
+    });
+
+    it('should combine inline and block comments', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'metadata',
+                comment: 'Resource metadata (block comment)'
+              }),
+              metadata: {
+                name: 'test'
+              },
+              ...addInstructions({
+                prop: 'enabled',
+                commentAfter: 'inline comment'
+              }),
+              enabled: null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('# Resource metadata (block comment)');
+      expect(result).toContain('enabled: # inline comment');
+    });
+
+    it('should work with schema-level commentAfter instructions', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        schema: {
+          properties: {
+            enabled: {
+              commentAfter: 'toggle deployment'
+            },
+            replicas: {
+              commentAfter: 'replica count'
+            }
+          }
+        },
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              enabled: null,
+              replicas: 3
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled: # toggle deployment');
+      expect(result).toContain('replicas: 3 # replica count');
+    });
+
+    it('should handle Kubernetes-style chart configuration with inline comments', () => {
+      const yamlString = 'charts: {}';
+      const alias = 'sealedSecrets';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj: any) => obj.charts,
+            merge: () => ({
+              ...addInstructions({
+                prop: alias,
+                commentAfter: 'SealedSecrets Helm chart'
+              }),
+              [alias]: {
+                ...addInstructions({
+                  prop: 'enabled',
+                  commentAfter: 'can change whether the chart will be deployed or not'
+                }),
+                enabled: null
+              }
+            })
+          });
+        }
+      });
+
+      // Note: When a property has an object value, the inline comment appears as block comment
+      expect(result).toContain('# SealedSecrets Helm chart');
+      expect(result).toContain('enabled: # can change whether the chart will be deployed or not');
+      expect(result).not.toContain('enabled: null');
+    });
+
+    it('should produce exact output with proper key ordering and empty values', () => {
+      const yaml = require('yaml');
+      const alias = 'sealedSecrets';
+
+      // Build initial YAML with proper structure
+      const doc = yaml.parseDocument('');
+      doc.contents = doc.createNode({});
+
+      // Add charts first
+      doc.contents.items.push(doc.createPair('charts', doc.createNode({
+        [alias]: {}
+      })));
+
+      // Add sealedSecrets with empty value (no null shown)
+      const sealedSecretsScalar = new yaml.Scalar(null);
+      sealedSecretsScalar.type = 'PLAIN';
+      sealedSecretsScalar.source = '';
+      doc.contents.items.push(doc.createPair('sealedSecrets', sealedSecretsScalar));
+
+      const yamlString = doc.toString();
+
+      // Use updateYaml to add inline comment to enabled
+      const { result } = updateYaml({
+        yamlString,
+        selectDocument: selectFirstDocument,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj: any) => obj.charts[alias],
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                commentAfter: 'enabled: can change whether the chart will be deployed or not'
+              }),
+              enabled: null
+            }),
+          });
+        },
+      });
+
+      const expected = `charts:
+  sealedSecrets:
+    enabled: # enabled: can change whether the chart will be deployed or not
+sealedSecrets:
+`;
+
+      expect(result).toBe(expected);
+    });
+  });
+
+  describe('hideNull instruction', () => {
+    it('should hide null values when hideNull is true', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                hideNull: true
+              }),
+              enabled: null
+            })
+          });
+        }
+      });
+
+      expect(result).toBe('enabled:\n');
+      expect(result).not.toContain('null');
+    });
+
+    it('should hide null with inline comment', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                commentAfter: 'toggle deployment',
+                hideNull: true
+              }),
+              enabled: null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled: # toggle deployment');
+      expect(result).not.toContain('enabled: null');
+    });
+
+    it('should work with nested properties', () => {
+      const yamlString = stringify({
+        charts: { sealedSecrets: {} }
+      });
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj: any) => obj.charts.sealedSecrets,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                hideNull: true
+              }),
+              enabled: null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled:');
+      expect(result).not.toContain('enabled: null');
+    });
+
+    it('should hide multiple null values', () => {
+      const yamlString = stringify({
+        charts: {},
+        config: {}
+      });
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj: any) => obj.charts,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                hideNull: true
+              }),
+              enabled: null,
+              ...addInstructions({
+                prop: 'version',
+                hideNull: true
+              }),
+              version: null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled:');
+      expect(result).toContain('version:');
+      expect(result).not.toContain('null');
+    });
+
+    it('should work with schema-level hideNull', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        schema: {
+          properties: {
+            enabled: {
+              hideNull: true
+            },
+            disabled: {
+              hideNull: true
+            }
+          }
+        },
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              enabled: null,
+              disabled: null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled:');
+      expect(result).toContain('disabled:');
+      expect(result).not.toContain('null');
+    });
+
+    it('should not hide non-null values', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                hideNull: true
+              }),
+              enabled: false,  // boolean false, not null
+              ...addInstructions({
+                prop: 'count',
+                hideNull: true
+              }),
+              count: 0  // number 0, not null
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('enabled: false');
+      expect(result).toContain('count: 0');
+    });
+
+    it('should produce exact Kubernetes-style output', () => {
+      const alias = 'sealedSecrets';
+
+      const initialStructure = {
+        charts: {
+          [alias]: {}
+        },
+        [alias]: null
+      };
+
+      const yamlString = stringify(initialStructure);
+
+      const { result } = updateYaml({
+        yamlString,
+        selectDocument: selectFirstDocument,
+        annotate: ({ change }) => {
+          change({
+            findKey: (obj: any) => obj.charts[alias],
+            merge: () => ({
+              ...addInstructions({
+                prop: 'enabled',
+                commentAfter: 'can change whether the chart will be deployed or not',
+                hideNull: true
+              }),
+              enabled: null
+            }),
+          });
+
+          change({
+            findKey: (obj: any) => obj,
+            merge: () => ({
+              ...addInstructions({
+                prop: alias,
+                hideNull: true
+              }),
+              [alias]: null
+            }),
+          });
+        },
+      });
+
+      const expected = `charts:
+  sealedSecrets:
+    enabled: # can change whether the chart will be deployed or not
+sealedSecrets:
+`;
+
+      expect(result).toBe(expected);
+    });
+  });
+
   describe('multi-document YAML support', () => {
     it('should select the first document using selectFirstDocument', () => {
       const yamlString = `---
@@ -4513,6 +4958,368 @@ workerConfig:
   labels: { app: myapp, env: prod }
 `);
       });
+    });
+  });
+
+  describe('key ordering', () => {
+    it('should preserve existing key order and append new keys', () => {
+      const yamlString = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+data:
+  key1: value1`;
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed.data,
+            merge: () => ({
+              key2: 'value2',
+              key3: 'value3'
+            })
+          });
+        }
+      });
+
+      // Original keys should come first, new keys appended after
+      const lines = result.split('\n');
+      const dataIndex = lines.findIndex(l => l.includes('data:'));
+      const key1Index = lines.findIndex(l => l.includes('key1:'));
+      const key2Index = lines.findIndex(l => l.includes('key2:'));
+      const key3Index = lines.findIndex(l => l.includes('key3:'));
+
+      expect(dataIndex).toBeGreaterThan(-1);
+      expect(key1Index).toBeGreaterThan(dataIndex);
+      expect(key2Index).toBeGreaterThan(key1Index);
+      expect(key3Index).toBeGreaterThan(key2Index);
+    });
+
+    it('should add new keys in the order they appear in merge object', () => {
+      const yamlString = `apiVersion: v1
+kind: ConfigMap`;
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              data: { key: 'value' },
+              metadata: { name: 'test' }
+            })
+          });
+        }
+      });
+
+      // Keys should be added in the order they appear in the merge object
+      // data comes before metadata in the merge, so data should come first
+      const lines = result.split('\n');
+      const dataIndex = lines.findIndex(l => l.match(/^data:/));
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+
+      expect(dataIndex).toBeGreaterThan(-1);
+      expect(metadataIndex).toBeGreaterThan(-1);
+      expect(dataIndex).toBeLessThan(metadataIndex);
+    });
+
+    it('should control key order by ordering merge object properties', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              // Explicitly order properties in desired sequence
+              apiVersion: 'v1',
+              kind: 'ConfigMap',
+              metadata: { name: 'test' },
+              data: { key: 'value' }
+            })
+          });
+        }
+      });
+
+      // Should follow the order in the merge object: apiVersion, kind, metadata, data
+      const lines = result.split('\n').filter(l => l.trim());
+      const apiVersionIndex = lines.findIndex(l => l.match(/^apiVersion:/));
+      const kindIndex = lines.findIndex(l => l.match(/^kind:/));
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+      const dataIndex = lines.findIndex(l => l.match(/^data:/));
+
+      expect(apiVersionIndex).toBeLessThan(kindIndex);
+      expect(kindIndex).toBeLessThan(metadataIndex);
+      expect(metadataIndex).toBeLessThan(dataIndex);
+    });
+
+    it('should maintain order from existing file even when adding new properties', () => {
+      const yamlString = `kind: ConfigMap
+apiVersion: v1`;
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              metadata: { name: 'test' },
+              data: { key: 'value' }
+            })
+          });
+        }
+      });
+
+      // Existing order (kind, apiVersion) is preserved
+      // New properties (metadata, data) are added after in merge object order
+      const lines = result.split('\n');
+      const kindIndex = lines.findIndex(l => l.match(/^kind:/));
+      const apiVersionIndex = lines.findIndex(l => l.match(/^apiVersion:/));
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+      const dataIndex = lines.findIndex(l => l.match(/^data:/));
+
+      expect(kindIndex).toBeLessThan(apiVersionIndex);
+      expect(apiVersionIndex).toBeLessThan(metadataIndex);
+      expect(metadataIndex).toBeLessThan(dataIndex);
+    });
+
+    it('should preserve strange existing order when updating', () => {
+      const yamlString = `data:
+  key1: value1
+kind: ConfigMap
+apiVersion: v1`;
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              metadata: { name: 'test' }
+            })
+          });
+        }
+      });
+
+      // Existing order: data, kind, apiVersion should be preserved
+      // New property: metadata should be added after
+      const lines = result.split('\n');
+      const dataIndex = lines.findIndex(l => l.match(/^data:/));
+      const kindIndex = lines.findIndex(l => l.match(/^kind:/));
+      const apiVersionIndex = lines.findIndex(l => l.match(/^apiVersion:/));
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+
+      // Original order preserved (even though it's unusual)
+      expect(dataIndex).toBeLessThan(kindIndex);
+      expect(kindIndex).toBeLessThan(apiVersionIndex);
+      // New property added after existing ones
+      expect(metadataIndex).toBeGreaterThan(apiVersionIndex);
+    });
+
+    it('should handle nested property ordering via merge object', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              apiVersion: 'v1',
+              kind: 'ConfigMap',
+              metadata: {
+                // Nested properties also follow merge object order
+                name: 'test',
+                namespace: 'default',
+                labels: { app: 'myapp' },
+                annotations: { key: 'val' }
+              }
+            })
+          });
+        }
+      });
+
+      // Check nested metadata properties follow merge object order
+      const lines = result.split('\n');
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+      const nameIndex = lines.findIndex((l, i) => i > metadataIndex && l.match(/^\s+name:/));
+      const namespaceIndex = lines.findIndex((l, i) => i > metadataIndex && l.match(/^\s+namespace:/));
+      const labelsIndex = lines.findIndex((l, i) => i > metadataIndex && l.match(/^\s+labels:/));
+      const annotationsIndex = lines.findIndex((l, i) => i > metadataIndex && l.match(/^\s+annotations:/));
+
+      expect(nameIndex).toBeLessThan(namespaceIndex);
+      expect(namespaceIndex).toBeLessThan(labelsIndex);
+      expect(labelsIndex).toBeLessThan(annotationsIndex);
+    });
+
+    it('should work with complex K8s deployment following merge object order', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              // Control order explicitly in merge object
+              apiVersion: 'apps/v1',
+              kind: 'Deployment',
+              metadata: {
+                name: 'my-deployment',
+                labels: { app: 'test' }
+              },
+              spec: {
+                replicas: 3,
+                selector: { matchLabels: {} },
+                template: { spec: { containers: [] } }
+              }
+            })
+          });
+        }
+      });
+
+      // Top-level should follow merge object order: apiVersion, kind, metadata, spec
+      const lines = result.split('\n').filter(l => l.trim());
+      const apiVersionIndex = lines.findIndex(l => l.match(/^apiVersion:/));
+      const kindIndex = lines.findIndex(l => l.match(/^kind:/));
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+      const specIndex = lines.findIndex(l => l.match(/^spec:/));
+
+      expect(apiVersionIndex).toBeLessThan(kindIndex);
+      expect(kindIndex).toBeLessThan(metadataIndex);
+      expect(metadataIndex).toBeLessThan(specIndex);
+
+      // Nested metadata should follow merge object order: name, labels
+      const nameIndex = lines.findIndex((l, i) => i > metadataIndex && l.match(/^\s+name:/));
+      const labelsIndex = lines.findIndex((l, i) => i > metadataIndex && l.match(/^\s+labels:/));
+      expect(nameIndex).toBeLessThan(labelsIndex);
+
+      // Nested spec should follow merge object order: replicas, selector, template
+      const replicasIndex = lines.findIndex((l, i) => i > specIndex && l.match(/^\s+replicas:/));
+      const selectorIndex = lines.findIndex((l, i) => i > specIndex && l.match(/^\s+selector:/));
+      const templateIndex = lines.findIndex((l, i) => i > specIndex && l.match(/^\s+template:/));
+      expect(replicasIndex).toBeLessThan(selectorIndex);
+      expect(selectorIndex).toBeLessThan(templateIndex);
+    });
+
+    it('should support schema comments independently of ordering', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        schema: {
+          properties: {
+            apiVersion: { comment: 'API version' },
+            kind: { comment: 'Resource kind' },
+            metadata: { comment: 'Resource metadata' },
+            data: { comment: 'Configuration data' }
+          }
+        },
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              // Note: Schema provides comments, but order follows merge object
+              apiVersion: 'v1',
+              kind: 'ConfigMap',
+              metadata: { name: 'test' },
+              data: { key: 'value' }
+            })
+          });
+        }
+      });
+
+      // All comments from schema should be present
+      expect(result).toContain('# API version');
+      expect(result).toContain('# Resource kind');
+      expect(result).toContain('# Resource metadata');
+      expect(result).toContain('# Configuration data');
+
+      // Order follows merge object, but comments are applied
+      const lines = result.split('\n');
+      const apiVersionCommentIndex = lines.findIndex(l => l.includes('# API version'));
+      const kindCommentIndex = lines.findIndex(l => l.includes('# Resource kind'));
+      const metadataCommentIndex = lines.findIndex(l => l.includes('# Resource metadata'));
+      const dataCommentIndex = lines.findIndex(l => l.includes('# Configuration data'));
+
+      expect(apiVersionCommentIndex).toBeLessThan(kindCommentIndex);
+      expect(kindCommentIndex).toBeLessThan(metadataCommentIndex);
+      expect(metadataCommentIndex).toBeLessThan(dataCommentIndex);
+    });
+
+    it('should handle partial schema with mixed existing and new properties', () => {
+      const yamlString = `kind: ConfigMap
+data:
+  existing: value`;
+
+      const { result } = updateYaml({
+        yamlString,
+        schema: {
+          properties: {
+            apiVersion: {},
+            kind: {},
+            metadata: {}
+          }
+        },
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              apiVersion: 'v1',
+              metadata: { name: 'test' },
+              data: { new: 'value2' }
+            })
+          });
+        }
+      });
+
+      const lines = result.split('\n');
+
+      // Existing properties (kind, data) should maintain their order
+      const kindIndex = lines.findIndex(l => l.match(/^kind:/));
+      const dataIndex = lines.findIndex(l => l.match(/^data:/));
+      expect(kindIndex).toBeLessThan(dataIndex);
+
+      // New properties should be added
+      const apiVersionIndex = lines.findIndex(l => l.match(/^apiVersion:/));
+      const metadataIndex = lines.findIndex(l => l.match(/^metadata:/));
+      expect(apiVersionIndex).toBeGreaterThan(-1);
+      expect(metadataIndex).toBeGreaterThan(-1);
+    });
+
+    it('should work with array items in schema', () => {
+      const yamlString = '';
+
+      const { result } = updateYaml({
+        yamlString,
+        schema: {
+          properties: {
+            items: {
+              type: 'array',
+              items: [
+                { comment: 'First item' },
+                { comment: 'Second item' }
+              ]
+            }
+          }
+        },
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: () => ({
+              items: [
+                { name: 'item1', value: 1 },
+                { name: 'item2', value: 2 }
+              ]
+            })
+          });
+        }
+      });
+
+      expect(result).toContain('# First item');
+      expect(result).toContain('# Second item');
     });
   });
 

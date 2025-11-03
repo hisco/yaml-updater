@@ -234,10 +234,10 @@ addInstructions({
   prop: 'propertyName',           // Property to apply instructions to
 
   // Comment options:
-  comment: 'Comment text',        // Add comment above the property
+  comment: 'Comment text',        // Add block comment above the property
   removeComment: true,            // Remove existing comment
-  commentBefore: 'Text',          // Alternative to comment
-  commentAfter: 'Text',           // Add comment after (limited support)
+  commentBefore: 'Text',          // Alternative to comment (same as comment)
+  commentAfter: 'Text',           // Add inline comment (same line as property)
 
   // Array merge strategies:
   mergeByContents: true,          // Deduplicate by deep equality
@@ -247,7 +247,8 @@ addInstructions({
 
   // Formatting options (YAML-specific):
   flow: true,                     // true = JSON format, false = YAML format
-  flowItems: [true, false, true]  // Per-item format for arrays
+  flowItems: [true, false, true], // Per-item format for arrays
+  hideNull: true                   // Hide null values (renders as "key:" not "key: null")
 })
 ```
 
@@ -274,6 +275,99 @@ const { result } = updateYaml({
 // # Configuration data section
 // data:
 //   key: value
+```
+
+**Example with inline comments (commentAfter):**
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'enabled',
+          commentAfter: 'toggle deployment'
+        }),
+        enabled: null,  // null values with inline comments render as "enabled: # comment"
+        ...addInstructions({
+          prop: 'replicas',
+          commentAfter: 'number of replicas'
+        }),
+        replicas: 3  // Non-null values render as "replicas: 3 # comment"
+      })
+    });
+  }
+});
+
+// enabled: # toggle deployment
+// replicas: 3 # number of replicas
+```
+
+**Note on inline comments with objects:**
+When a property has an object/array value (not a scalar), the inline comment appears as a block comment at the start of the content:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'metadata',
+          commentAfter: 'metadata comment'
+        }),
+        metadata: {
+          name: 'test'
+        }
+      })
+    });
+  }
+});
+
+// metadata:
+//   # metadata comment
+//   name: test
+```
+
+**Example with hideNull:**
+```typescript
+const { result } = updateYaml({
+  yamlString: stringify({
+    charts: { sealedSecrets: {} },
+    sealedSecrets: null
+  }),
+  annotate: ({ change }) => {
+    change({
+      findKey: (obj) => obj.charts.sealedSecrets,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'enabled',
+          commentAfter: 'toggle deployment',
+          hideNull: true  // Hides null, shows "enabled:" not "enabled: null"
+        }),
+        enabled: null
+      })
+    });
+
+    change({
+      findKey: (obj) => obj,
+      merge: () => ({
+        ...addInstructions({
+          prop: 'sealedSecrets',
+          hideNull: true  // Hides value, shows "sealedSecrets:" not "sealedSecrets: null"
+        }),
+        sealedSecrets: null
+      })
+    });
+  }
+});
+
+// charts:
+//   sealedSecrets:
+//     enabled: # toggle deployment
+// sealedSecrets:
 ```
 
 ### Removing Comments
@@ -1676,6 +1770,150 @@ try {
 - `yaml`: YAML 1.2 parser and stringifier
 - `deep-diff`: Deep object diffing
 - `@hiscojs/object-updater`: Core object manipulation with type-safe updates
+
+## Property Ordering
+
+### How Key Order Works
+
+The YAML updater determines property order based on **merge object property order**, not schema order.
+
+**For new files (empty YAML):**
+Keys appear in the exact order they are defined in your merge object:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        apiVersion: 'v1',           // 1st
+        kind: 'ConfigMap',          // 2nd
+        metadata: { name: 'test' }, // 3rd
+        data: { key: 'value' }      // 4th
+      })
+    });
+  }
+});
+
+// Output follows merge object order:
+// apiVersion: v1
+// kind: ConfigMap
+// metadata:
+//   name: test
+// data:
+//   key: value
+```
+
+**For existing files:**
+- Existing keys maintain their original order (preserved from source YAML)
+- New keys are appended in the order they appear in the merge object
+
+```typescript
+const yamlString = `kind: ConfigMap
+apiVersion: v1`;
+
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        metadata: { name: 'test' },  // New
+        data: { key: 'value' }       // New
+      })
+    });
+  }
+});
+
+// Output preserves original order and appends new keys:
+// kind: ConfigMap        (existing, order preserved)
+// apiVersion: v1         (existing, order preserved)
+// metadata:              (new, added in merge order)
+//   name: test
+// data:                  (new, added in merge order)
+//   key: value
+```
+
+### Schema Does NOT Control Ordering
+
+The `schema` parameter is used for **metadata** (comments, formatting, anchors), **not for ordering**:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: '',
+  schema: {
+    properties: {
+      apiVersion: { comment: 'API version' },
+      kind: { comment: 'Resource type' }
+    }
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed,
+      merge: () => ({
+        // Order comes from HERE, not from schema
+        kind: 'ConfigMap',
+        apiVersion: 'v1'
+      })
+    });
+  }
+});
+
+// Output follows merge object order with schema comments:
+// # Resource type
+// kind: ConfigMap
+// # API version
+// apiVersion: v1
+```
+
+### Best Practices for Ordering
+
+**✅ Control order explicitly via merge object:**
+
+```typescript
+// Good: Explicit, predictable order
+merge: () => ({
+  apiVersion: 'v1',
+  kind: 'ConfigMap',
+  metadata: { name: 'test' },
+  data: { key: 'value' }
+})
+```
+
+**✅ Use helper functions for consistent ordering:**
+
+```typescript
+function createK8sResource(kind: string, name: string, data: any) {
+  return {
+    apiVersion: 'v1',
+    kind,
+    metadata: { name },
+    data
+  };
+}
+
+merge: () => createK8sResource('ConfigMap', 'my-config', { key: 'value' })
+```
+
+**✅ Nested properties also follow merge object order:**
+
+```typescript
+merge: () => ({
+  metadata: {
+    name: 'test',           // 1st in metadata
+    namespace: 'default',   // 2nd in metadata
+    labels: { app: 'myapp' } // 3rd in metadata
+  }
+})
+
+// Output:
+// metadata:
+//   name: test
+//   namespace: default
+//   labels:
+//     app: myapp
+```
 
 ## Related Packages
 

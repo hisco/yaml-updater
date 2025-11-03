@@ -60,6 +60,12 @@ interface YAMLFormatInstructions {
    * - false: Use block style for this item
    */
   flowItems?: boolean[];
+  /**
+   * Hide null values in YAML output
+   * When true, renders as "key:" instead of "key: null"
+   * Useful for properties that should exist but have no value
+   */
+  hideNull?: boolean;
 }
 
 /**
@@ -161,6 +167,7 @@ export const addInstructions = (options: {
   commentAfter?: string;
   flow?: boolean;  // YAML-specific: control flow (JSON) vs block (YAML) style
   flowItems?: boolean[];  // YAML-specific: control flow for individual array items
+  hideNull?: boolean;  // YAML-specific: hide null values
   anchor?: string;  // YAML-specific: create an anchor on this property
   renameFrom?: string;  // YAML-specific: rename existing anchor globally
   alias?: string;  // YAML-specific: create an alias reference
@@ -169,11 +176,11 @@ export const addInstructions = (options: {
   aliases?: string[];  // YAML-specific: aliases for array items
 }) => {
   // Call the original addInstructions with base properties
-  const { flow, flowItems, anchor, renameFrom, alias, mergeAnchor, anchors, aliases, ...baseOptions } = options;
+  const { flow, flowItems, hideNull, anchor, renameFrom, alias, mergeAnchor, anchors, aliases, ...baseOptions } = options;
   const result = addObjectInstructions(baseOptions);
 
   // If YAML-specific options are specified, add them to the result
-  if (flow !== undefined || flowItems !== undefined || anchor !== undefined || renameFrom !== undefined || alias !== undefined || mergeAnchor !== undefined || anchors !== undefined || aliases !== undefined) {
+  if (flow !== undefined || flowItems !== undefined || hideNull !== undefined || anchor !== undefined || renameFrom !== undefined || alias !== undefined || mergeAnchor !== undefined || anchors !== undefined || aliases !== undefined) {
     const symbolKey = Object.getOwnPropertySymbols(result).find(
       sym => sym.toString().includes(`merge_${options.prop}`)
     );
@@ -184,6 +191,9 @@ export const addInstructions = (options: {
       }
       if (flowItems !== undefined) {
         instructions.flowItems = flowItems;
+      }
+      if (hideNull !== undefined) {
+        instructions.hideNull = hideNull;
       }
       if (anchor !== undefined) {
         instructions.anchor = anchor;
@@ -451,7 +461,7 @@ export function updateYaml<T>({
         const instructions = objWithSymbols[sym] as YAMLInstructions | undefined;
         const fullPath = [...basePath, prop];
 
-        if (instructions && (instructions.comment || instructions.removeComment || instructions.commentBefore || instructions.commentAfter || instructions.flow !== undefined || instructions.flowItems !== undefined || instructions.anchor || instructions.alias || instructions.mergeAnchor || instructions.anchors || instructions.aliases || instructions.mergeByName || instructions.mergeByProp || instructions.mergeByContents || instructions.deepMerge)) {
+        if (instructions && (instructions.comment || instructions.removeComment || instructions.commentBefore || instructions.commentAfter || instructions.flow !== undefined || instructions.flowItems !== undefined || instructions.hideNull || instructions.anchor || instructions.alias || instructions.mergeAnchor || instructions.anchors || instructions.aliases || instructions.mergeByName || instructions.mergeByProp || instructions.mergeByContents || instructions.deepMerge)) {
           instructionsMap.set(JSON.stringify(fullPath), instructions);
 
           // If this has an anchor definition, track it
@@ -789,15 +799,31 @@ export function updateYaml<T>({
   const comments: { path: (string | number)[]; comment: string }[] = [];
 
   // First apply comments from the change() comment callback
-  objectComments.forEach(({ path, comment: commentText }) => {
+  objectComments.forEach(({ path, comment: commentText, direction }) => {
     const node = originalYamlDocument.getIn(path, true);
     if (node) {
       const yamlNode = node as YAMLNodeWithComment;
-      yamlNode.commentBefore = ' ' + commentText;
 
-      // If we're adding a comment to an empty object/array, ensure it's not in flow style
-      if (commentText && yamlNode.type === 'MAP' && yamlNode.items && Array.isArray(yamlNode.items) && yamlNode.items.length === 0) {
-        yamlNode.flow = false;
+      // Check if this is an inline comment (direction = 'right')
+      if (direction === 'right') {
+        // Apply inline comment to the value node
+        (yamlNode as any).comment = ' ' + commentText;
+
+        // If the value is null and we're adding an inline comment,
+        // set source to empty string so it renders as "key: # comment" not "key: null # comment"
+        // Note: type might be undefined for created nodes, so we check value === null instead
+        if ((yamlNode as any).value === null) {
+          (yamlNode as any).type = 'PLAIN';
+          (yamlNode as any).source = '';
+        }
+      } else {
+        // Default: apply comment before (block comment above the key)
+        yamlNode.commentBefore = ' ' + commentText;
+
+        // If we're adding a comment to an empty object/array, ensure it's not in flow style
+        if (commentText && yamlNode.type === 'MAP' && yamlNode.items && Array.isArray(yamlNode.items) && yamlNode.items.length === 0) {
+          yamlNode.flow = false;
+        }
       }
 
       comments.push({
@@ -1050,7 +1076,7 @@ export function updateYaml<T>({
     }
 
     // Apply comment instructions
-    if (instructions.comment || instructions.removeComment || instructions.commentBefore) {
+    if (instructions.comment || instructions.removeComment || instructions.commentBefore || instructions.commentAfter) {
       // If we couldn't find the Pair's key as an object, try setting comment on the value node
       // This is a fallback for newly created properties where the key is a simple string
       if (!commentTargetNode && valueNode) {
@@ -1079,6 +1105,31 @@ export function updateYaml<T>({
           });
         }
       }
+    }
+
+    // Apply inline comment (commentAfter) to value node
+    if (instructions.commentAfter && valueNode) {
+      (valueNode as any).comment = ' ' + instructions.commentAfter;
+
+      // If the value is null and we're adding an inline comment,
+      // set source to empty string so it renders as "key: # comment" not "key: null # comment"
+      // IMPORTANT: Set source AFTER setting comment, as the YAML library won't regenerate it
+      // Note: type might be undefined for created nodes, so we check value === null instead
+      if ((valueNode as any).value === null) {
+        (valueNode as any).type = 'PLAIN';
+        (valueNode as any).source = '';
+      }
+
+      comments.push({
+        path,
+        comment: instructions.commentAfter
+      });
+    }
+
+    // Apply hideNull instruction
+    if (valueNode && instructions.hideNull && (valueNode as any).value === null) {
+      (valueNode as any).type = 'PLAIN';
+      (valueNode as any).source = '';
     }
 
     // Apply flow style instructions

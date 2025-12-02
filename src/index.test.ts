@@ -5397,4 +5397,532 @@ kind: Kustomization`;
       expect(result).not.toContain('resources: [');
     });
   });
+
+  describe('document headers', () => {
+    describe('simple headers', () => {
+      it('should add simple header to YAML document', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: value
+`;
+
+        interface ConfigMap {
+          apiVersion: string;
+          kind: string;
+          data: { key: string };
+        }
+
+        const { result } = updateYaml<ConfigMap>({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: ['API Gateway configuration', 'Owner: platform-team']
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj.data,
+              merge: () => ({ key: 'updated' })
+            });
+          }
+        });
+
+        expect(result).toBe(`# API Gateway configuration
+# Owner: platform-team
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: updated
+`);
+      });
+
+      it('should replace existing header with new simple header', () => {
+        const yamlString = `# Old header
+# Old owner
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: value
+`;
+
+        interface ConfigMap {
+          apiVersion: string;
+          kind: string;
+          data: { key: string };
+        }
+
+        const { result } = updateYaml<ConfigMap>({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: ['New header', 'New owner']
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj.data,
+              merge: () => ({ key: 'updated' })
+            });
+          }
+        });
+
+        expect(result).toBe(`# New header
+# New owner
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: updated
+`);
+        expect(result).not.toContain('Old header');
+        expect(result).not.toContain('Old owner');
+      });
+
+      it('should extract simple header from YAML', () => {
+        const yamlString = `# API Gateway configuration
+# Owner: platform-team
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { extractedHeader } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: []
+          }
+        });
+
+        expect(extractedHeader).toBeDefined();
+        expect(extractedHeader?.type).toBe('simple');
+        expect(extractedHeader?.content).toEqual([
+          'API Gateway configuration',
+          'Owner: platform-team'
+        ]);
+      });
+
+      it('should handle simple header with single line', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: 'Single line header'
+          }
+        });
+
+        expect(result).toBe(`# Single line header
+apiVersion: v1
+kind: ConfigMap
+`);
+      });
+    });
+
+    describe('multi-line headers', () => {
+      it('should add multi-line bordered header to YAML document', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: value
+`;
+
+        interface ConfigMap {
+          apiVersion: string;
+          kind: string;
+          data: { key: string };
+        }
+
+        const { result } = updateYaml<ConfigMap>({
+          yamlString,
+          documentHeader: {
+            type: 'multi-line',
+            content: [
+              'PRODUCTION KUBERNETES CONFIG',
+              'DO NOT MODIFY WITHOUT APPROVAL',
+              'Contact: platform-team@company.com'
+            ]
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj.data,
+              merge: () => ({ key: 'updated' })
+            });
+          }
+        });
+
+        expect(result).toContain('#######################################');
+        expect(result).toContain('# PRODUCTION KUBERNETES CONFIG');
+        expect(result).toContain('# DO NOT MODIFY WITHOUT APPROVAL');
+        expect(result).toContain('# Contact: platform-team@company.com');
+        expect(result).toMatch(/^#{3,}/); // Starts with border
+      });
+
+      it('should extract multi-line header from YAML', () => {
+        const yamlString = `#######################################
+# PRODUCTION KUBERNETES CONFIG
+# DO NOT MODIFY WITHOUT APPROVAL
+# Contact: platform-team@company.com
+#######################################
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { extractedHeader } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'multi-line',
+            content: []
+          }
+        });
+
+        expect(extractedHeader).toBeDefined();
+        expect(extractedHeader?.type).toBe('multi-line');
+        expect(extractedHeader?.content).toEqual([
+          'PRODUCTION KUBERNETES CONFIG',
+          'DO NOT MODIFY WITHOUT APPROVAL',
+          'Contact: platform-team@company.com'
+        ]);
+      });
+
+      it('should support custom border character for multi-line header', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'multi-line',
+            content: ['Header line'],
+            border: '##'
+          }
+        });
+
+        expect(result).toMatch(/^#{6,}/); // Double border
+        expect(result).toContain('## Header line');
+      });
+
+      it('should support custom width for multi-line header', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'multi-line',
+            content: ['Short'],
+            width: 20
+          }
+        });
+
+        const lines = result.split('\n');
+        const borderLine = lines[0];
+        expect(borderLine.length).toBe(20);
+      });
+    });
+
+    describe('raw headers', () => {
+      it('should add raw header exactly as provided', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: value
+`;
+
+        const rawHeader = `###
+### Custom styled header
+### With any format
+###`;
+
+        interface ConfigMap {
+          apiVersion: string;
+          kind: string;
+          data: { key: string };
+        }
+
+        const { result } = updateYaml<ConfigMap>({
+          yamlString,
+          documentHeader: {
+            type: 'raw',
+            content: rawHeader
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj.data,
+              merge: () => ({ key: 'updated' })
+            });
+          }
+        });
+
+        expect(result).toBe(`###
+### Custom styled header
+### With any format
+###
+apiVersion: v1
+kind: ConfigMap
+data:
+  key: updated
+`);
+      });
+
+      it('should extract raw header exactly as is', () => {
+        const yamlString = `###
+### Custom styled header
+### With any format
+###
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { extractedHeader } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'raw',
+            content: ''
+          }
+        });
+
+        expect(extractedHeader).toBeDefined();
+        expect(extractedHeader?.type).toBe('raw');
+        expect(extractedHeader?.raw).toBe(`###
+### Custom styled header
+### With any format
+###`);
+      });
+
+      it('should handle raw header with mixed comment styles', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const rawHeader = `# Line 1
+## Line 2
+### Line 3
+# Line 4`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'raw',
+            content: rawHeader
+          }
+        });
+
+        expect(result).toBe(`# Line 1
+## Line 2
+### Line 3
+# Line 4
+apiVersion: v1
+kind: ConfigMap
+`);
+      });
+    });
+
+    describe('multi-document YAML', () => {
+      it('should apply header to first document by default', () => {
+        const yamlString = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config2
+`;
+
+        interface ConfigMap {
+          apiVersion: string;
+          kind: string;
+          metadata: {
+            name: string;
+            namespace?: string;
+          };
+        }
+
+        const { result } = updateYaml<ConfigMap>({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: ['First doc header']
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj.metadata,
+              merge: (metadata) => ({ ...metadata, namespace: 'default' })
+            });
+          }
+        });
+
+        expect(result).toContain('# First doc header');
+        const headerIndex = result.indexOf('# First doc header');
+        const firstDocIndex = result.indexOf('apiVersion: v1');
+        const secondDocIndex = result.indexOf('name: config2');
+
+        expect(headerIndex).toBeLessThan(firstDocIndex);
+        expect(firstDocIndex).toBeLessThan(secondDocIndex);
+      });
+
+      it('should apply header to selected document', () => {
+        const yamlString = `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config2
+`;
+
+        interface ConfigMap {
+          apiVersion: string;
+          kind: string;
+          metadata: {
+            name: string;
+            namespace?: string;
+          };
+        }
+
+        const { result } = updateYaml<ConfigMap>({
+          yamlString,
+          selectDocument: () => 1, // Select second document
+          documentHeader: {
+            type: 'simple',
+            content: ['Second doc header']
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj.metadata,
+              merge: (metadata) => ({ ...metadata, namespace: 'prod' })
+            });
+          }
+        });
+
+        // The second document should have the header
+        const parts = result.split('---');
+        expect(parts[2]).toContain('# Second doc header');
+        expect(parts[2]).toContain('namespace: prod');
+      });
+    });
+
+    describe('edge cases', () => {
+      it('should handle empty YAML with header', () => {
+        const yamlString = '';
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: ['Header for empty file']
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj,
+              merge: () => ({ key: 'value' })
+            });
+          }
+        });
+
+        expect(result).toBe(`# Header for empty file
+key: value
+`);
+      });
+
+      it('should handle YAML with only comments (no content)', () => {
+        const yamlString = `# Just a comment
+# Another comment
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: ['New header']
+          },
+          annotate: ({ change }) => {
+            change({
+              findKey: (obj) => obj,
+              merge: () => ({ key: 'value' })
+            });
+          }
+        });
+
+        expect(result).toBe(`# New header
+key: value
+`);
+      });
+
+      it('should preserve non-header comments in document body', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+# This is a field comment
+data:
+  key: value
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: ['Document header']
+          }
+        });
+
+        expect(result).toContain('# Document header');
+        expect(result).toContain('# This is a field comment');
+      });
+
+      it('should handle header with empty content array', () => {
+        const yamlString = `# Old header
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'simple',
+            content: []
+          }
+        });
+
+        // Empty header should remove existing header
+        expect(result).not.toContain('# Old header');
+        expect(result).toBe(`apiVersion: v1
+kind: ConfigMap
+`);
+      });
+
+      it('should handle multi-line header with single content line', () => {
+        const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+`;
+
+        const { result } = updateYaml({
+          yamlString,
+          documentHeader: {
+            type: 'multi-line',
+            content: ['Single line']
+          }
+        });
+
+        expect(result).toMatch(/^#{3,}/);
+        expect(result).toContain('# Single line');
+      });
+    });
+  });
 });

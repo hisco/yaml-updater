@@ -44,6 +44,7 @@ console.log(result);
 - **Type-Safe**: Full TypeScript support with generic type parameters
 - **Comment Preservation**: Automatically preserves existing YAML comments
 - **Comment Manipulation**: Add, remove, or update comments programmatically
+- **Document Headers**: Add, extract, and manage headers at the top of YAML documents (new!)
 - **YAML Anchors & Aliases**: Create reusable content with anchors, aliases, and merge keys
 - **Anchor Renaming**: Rename anchors and update all references document-wide
 - **Schema-Level Instructions**: Define structure metadata separately from data (OpenAPI-style)
@@ -69,9 +70,11 @@ interface UpdateYamlOptions<T> {
   yamlString: string;
   selectDocument?: (yamlDocuments: Document[]) => number;
   schema?: YAMLSchema;  // Optional schema-level instructions
+  documentHeader?: DocumentHeader;  // Optional document header
   annotate?: (annotator: {
     change: <L>(options: ChangeOptions<T, L>) => void;
   }) => void;
+  defaultFlow?: boolean;  // Default flow style for all nodes
 }
 
 interface YAMLSchema {
@@ -115,6 +118,7 @@ interface YamlEdit<T> {
     path: (string | number)[];
     comment: string;
   }>;
+  extractedHeader?: ExtractedHeader;  // Extracted document header (if present)
 }
 ```
 
@@ -182,6 +186,244 @@ const { result, resultParsed } = updateYaml<Config>({
 
 console.log(resultParsed.server.port);  // Type-safe access
 ```
+
+## Document Headers
+
+Add, extract, and manage headers at the top of YAML documents for documentation, warnings, or metadata.
+
+### Three Header Types
+
+#### 1. Simple Headers
+
+Each line prefixed with `# `:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: myYaml,
+  documentHeader: {
+    type: 'simple',
+    content: ['API Gateway configuration', 'Owner: platform-team']
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed.data,
+      merge: () => ({ database: 'db.production.com' })
+    });
+  }
+});
+
+// Output:
+// # API Gateway configuration
+// # Owner: platform-team
+// apiVersion: v1
+// kind: ConfigMap
+// data:
+//   database: db.production.com
+```
+
+#### 2. Multi-line Headers
+
+Bordered headers with customizable borders and width:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: myYaml,
+  documentHeader: {
+    type: 'multi-line',
+    content: [
+      'PRODUCTION KUBERNETES CONFIG',
+      'DO NOT MODIFY WITHOUT APPROVAL',
+      'Contact: platform-team@company.com'
+    ],
+    border: '#',   // Optional: default is '#'
+    width: 60      // Optional: auto-calculated from content if not specified
+  }
+});
+
+// Output:
+// ########################################
+// # PRODUCTION KUBERNETES CONFIG
+// # DO NOT MODIFY WITHOUT APPROVAL
+// # Contact: platform-team@company.com
+// ########################################
+// apiVersion: v1
+// kind: Service
+```
+
+#### 3. Raw Headers
+
+User-controlled exact formatting:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: myYaml,
+  documentHeader: {
+    type: 'raw',
+    content: `###
+### Custom styled header
+### With any format you want
+###`
+  }
+});
+
+// Output:
+// ###
+// ### Custom styled header
+// ### With any format you want
+// ###
+// apiVersion: v1
+// kind: ConfigMap
+```
+
+### Extracting Existing Headers
+
+Extract headers from YAML files with formatting stripped based on type:
+
+```typescript
+const yamlWithHeader = `# Configuration File
+# Version: 1.0
+# Owner: DevOps
+apiVersion: v1
+kind: ConfigMap`;
+
+const { extractedHeader } = updateYaml({
+  yamlString: yamlWithHeader,
+  documentHeader: {
+    type: 'simple',
+    content: []  // Empty content triggers extraction
+  }
+});
+
+console.log(extractedHeader?.content);
+// ['Configuration File', 'Version: 1.0', 'Owner: DevOps']
+
+console.log(extractedHeader?.raw);
+// '# Configuration File\n# Version: 1.0\n# Owner: DevOps'
+```
+
+### Replacing Headers
+
+Headers are always replaced with new ones:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: yamlWithOldHeader,
+  documentHeader: {
+    type: 'simple',
+    content: ['Updated Configuration', 'Version: 2.0']
+  }
+});
+
+// Old header is removed, new header added
+```
+
+### Removing Headers
+
+Provide empty content to remove headers:
+
+```typescript
+const { result } = updateYaml({
+  yamlString: yamlWithHeader,
+  documentHeader: {
+    type: 'simple',
+    content: []  // Empty array removes header
+  }
+});
+```
+
+### Headers with Multi-Document YAML
+
+Headers are applied to the document being modified (respects `selectDocument`):
+
+```typescript
+const { result } = updateYaml({
+  yamlString: multiDocYaml,
+  selectDocument: () => 1,  // Second document
+  documentHeader: {
+    type: 'simple',
+    content: ['Second document configuration']
+  },
+  annotate: ({ change }) => {
+    change({
+      findKey: (parsed) => parsed.metadata,
+      merge: () => ({ namespace: 'production' })
+    });
+  }
+});
+
+// Header applied only to second document
+```
+
+### Real-World Header Examples
+
+#### Production Warning Header
+
+```typescript
+const { result } = updateYaml({
+  yamlString: deploymentYaml,
+  documentHeader: {
+    type: 'multi-line',
+    content: [
+      'PRODUCTION ENVIRONMENT',
+      'DO NOT EDIT MANUALLY',
+      'Managed by GitOps - Changes will be overwritten',
+      'Contact: devops@company.com'
+    ]
+  }
+});
+```
+
+#### Configuration Metadata
+
+```typescript
+const { result } = updateYaml({
+  yamlString: configYaml,
+  documentHeader: {
+    type: 'simple',
+    content: [
+      'Application Configuration',
+      `Generated: ${new Date().toISOString()}`,
+      'Environment: production',
+      'Version: 2.1.0'
+    ]
+  }
+});
+```
+
+#### Custom Format for Documentation
+
+```typescript
+const { result } = updateYaml({
+  yamlString: valuesYaml,
+  documentHeader: {
+    type: 'raw',
+    content: `# ============================================
+#  Helm Chart Values
+#  Chart: myapp
+#  Version: 1.0.0
+# ============================================`
+  }
+});
+```
+
+### DocumentHeader Type Reference
+
+```typescript
+interface DocumentHeader {
+  type: 'simple' | 'multi-line' | 'raw';
+  content: string | string[];
+  border?: string;      // For multi-line only (default: '#')
+  width?: number;       // For multi-line only (default: auto-calculated)
+}
+
+interface ExtractedHeader {
+  type: 'simple' | 'multi-line' | 'raw';
+  content: string[];    // Parsed content with formatting stripped
+  raw: string;          // Raw header string as it appeared
+}
+```
+
+For more details, see [DOCUMENT-HEADERS.md](DOCUMENT-HEADERS.md).
 
 ## Comment Management
 

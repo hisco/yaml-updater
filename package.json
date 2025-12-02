@@ -1,6 +1,6 @@
 {
   "name": "@hiscojs/yaml-updater",
-  "version": "1.0.13",
+  "version": "1.0.15",
   "description": "Type-safe, immutable YAML updates with comment preservation, YAML/JSON formatting control, per-item array formatting, multi-document support, and advanced array merging strategies",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

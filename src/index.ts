@@ -120,6 +120,58 @@ interface AnchorInstructions {
 interface YAMLInstructions extends CommentInstructions, YAMLFormatInstructions, AnchorInstructions, MergeInstructions {}
 
 /**
+ * Document header configuration for adding headers to YAML documents
+ */
+export interface DocumentHeader {
+  /**
+   * Type of header formatting:
+   * - 'simple': Each line prefixed with '# '
+   * - 'multi-line': Bordered header with top/bottom borders
+   * - 'raw': Exact content as provided (user handles formatting)
+   */
+  type: 'simple' | 'multi-line' | 'raw';
+
+  /**
+   * Header content:
+   * - For 'simple' and 'multi-line': array of strings (one per line) or single string
+   * - For 'raw': the exact string to place at the top of the document
+   */
+  content: string | string[];
+
+  /**
+   * Border character(s) for multi-line headers (default: '#')
+   * Only used when type is 'multi-line'
+   */
+  border?: string;
+
+  /**
+   * Width of multi-line header border (default: auto-calculated from content)
+   * Only used when type is 'multi-line'
+   */
+  width?: number;
+}
+
+/**
+ * Extracted header information from a YAML document
+ */
+export interface ExtractedHeader {
+  /**
+   * The type of header detected
+   */
+  type: 'simple' | 'multi-line' | 'raw';
+
+  /**
+   * Parsed content lines (stripped of formatting for simple/multi-line)
+   */
+  content: string[];
+
+  /**
+   * Raw header string exactly as it appeared in the document
+   */
+  raw: string;
+}
+
+/**
  * Schema property definition for a single property
  */
 interface SchemaProperty extends YAMLInstructions {
@@ -174,7 +226,7 @@ export const addInstructions = (options: {
   mergeAnchor?: string;  // YAML-specific: merge with an anchor
   anchors?: Record<number, string>;  // YAML-specific: anchors for array items
   aliases?: string[];  // YAML-specific: aliases for array items
-}) => {
+}): Record<symbol, MergeInstructions & CommentInstructions & YAMLFormatInstructions & AnchorInstructions> => {
   // Call the original addInstructions with base properties
   const { flow, flowItems, hideNull, anchor, renameFrom, alias, mergeAnchor, anchors, aliases, ...baseOptions } = options;
   const result = addObjectInstructions(baseOptions);
@@ -230,6 +282,7 @@ export interface YamlEdit<T> {
     path: (string | number)[];
     comment: string;
   }[];
+  extractedHeader?: ExtractedHeader;  // Extracted document header (if present)
 }
 
 /**
@@ -297,7 +350,8 @@ export function updateYaml<T>({
   selectDocument = () => 0,
   schema,
   annotate,
-  defaultFlow = false
+  defaultFlow = false,
+  documentHeader
 }: {
   yamlString: string;
   selectDocument?: (yamlDocuments: Document[]) => number;
@@ -310,9 +364,132 @@ export function updateYaml<T>({
     }) => void;
   }) => void;
   defaultFlow?: boolean;  // Default flow style for all nodes (false = block style, true = flow style)
+  documentHeader?: DocumentHeader;  // Document header configuration
 }): YamlEdit<T> {
+  // Helper function to extract header from YAML string
+  const extractHeader = (yaml: string, headerType?: 'simple' | 'multi-line' | 'raw'): { header: ExtractedHeader | undefined; yamlWithoutHeader: string } => {
+    const lines = yaml.split('\n');
+    const headerLines: string[] = [];
+    let i = 0;
+
+    // Skip leading empty lines
+    while (i < lines.length && lines[i].trim() === '') {
+      i++;
+    }
+
+    // Extract all leading comment lines
+    while (i < lines.length && lines[i].trim().startsWith('#')) {
+      headerLines.push(lines[i]);
+      i++;
+    }
+
+    if (headerLines.length === 0) {
+      return { header: undefined, yamlWithoutHeader: yaml };
+    }
+
+    const rawHeader = headerLines.join('\n');
+    const remainingYaml = lines.slice(i).join('\n');
+
+    if (!headerType) {
+      return { header: undefined, yamlWithoutHeader: yaml };
+    }
+
+    // Parse header based on type
+    let content: string[] = [];
+
+    if (headerType === 'simple') {
+      // Strip '# ' prefix from each line
+      content = headerLines.map(line => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('# ')) {
+          return trimmed.substring(2);
+        } else if (trimmed === '#') {
+          return '';
+        } else if (trimmed.startsWith('#')) {
+          return trimmed.substring(1);
+        }
+        return trimmed;
+      });
+    } else if (headerType === 'multi-line') {
+      // Detect border lines (lines with only # characters)
+      const borderPattern = /^#{3,}$/;
+      content = headerLines
+        .filter(line => !borderPattern.test(line.trim()))
+        .map(line => {
+          const trimmed = line.trim();
+          // Remove leading '#' and spaces
+          return trimmed.replace(/^#+\s*/, '').replace(/\s*#+$/, '').trim();
+        })
+        .filter(line => line.length > 0);
+    } else if (headerType === 'raw') {
+      content = headerLines;
+    }
+
+    return {
+      header: {
+        type: headerType,
+        content,
+        raw: rawHeader
+      },
+      yamlWithoutHeader: remainingYaml
+    };
+  };
+
+  // Helper function to format and apply header to YAML string
+  const applyHeader = (yaml: string, header: DocumentHeader): string => {
+    const contentArray = Array.isArray(header.content) ? header.content : [header.content];
+
+    if (contentArray.length === 0) {
+      // Empty header means no header
+      return yaml;
+    }
+
+    let headerText = '';
+
+    if (header.type === 'simple') {
+      headerText = contentArray.map(line => `# ${line}`).join('\n');
+    } else if (header.type === 'multi-line') {
+      const border = header.border || '#';
+
+      // Calculate width
+      let width: number;
+      if (header.width) {
+        width = header.width;
+      } else {
+        // Auto-calculate: find longest content line and add padding
+        const maxContentLength = Math.max(...contentArray.map(line => line.length));
+        // Format: "# content #" with at least one space padding
+        width = Math.max(40, maxContentLength + border.length * 2 + 4);
+      }
+
+      const topBorder = border.repeat(Math.floor(width / border.length));
+      const bottomBorder = topBorder;
+
+      const contentLines = contentArray.map(line => {
+        return `${border} ${line}`;
+      });
+
+      headerText = [topBorder, ...contentLines, bottomBorder].join('\n');
+    } else if (header.type === 'raw') {
+      // Raw type: content should be a single string or joined
+      headerText = Array.isArray(header.content) ? header.content.join('\n') : header.content;
+    }
+
+    return headerText + '\n' + yaml;
+  };
+
+  // Step 0: Extract existing header if documentHeader is provided
+  let extractedHeader: ExtractedHeader | undefined;
+  let yamlStringWithoutHeader = yamlString;
+
+  if (documentHeader) {
+    const extraction = extractHeader(yamlString, documentHeader.type);
+    extractedHeader = extraction.header;
+    yamlStringWithoutHeader = extraction.yamlWithoutHeader;
+  }
+
   // Step 1: Parse YAML
-  let yamlDocuments = parseAllDocuments(yamlString);
+  let yamlDocuments = parseAllDocuments(yamlStringWithoutHeader);
 
   // Handle empty YAML strings - create a new empty document
   if (yamlDocuments.length === 0 || !yamlDocuments[0] || yamlDocuments[0].toJSON() === null) {
@@ -1175,11 +1352,36 @@ export function updateYaml<T>({
   // Fix resultParsed if arrays were incorrectly duplicated
   const fixedResult = yamlDocuments[docIndex].toJSON() as T;
 
+  // Step 7: Apply document header if provided
+  if (documentHeader && documentHeader.content && (Array.isArray(documentHeader.content) ? documentHeader.content.length > 0 : documentHeader.content !== '')) {
+    // For multi-document YAML, we need to apply header to the correct document
+    if (yamlDocuments.length > 1) {
+      // Split result by document separators
+      const docs = result.split(/\n---\n/);
+      if (docs[docIndex]) {
+        // Apply header to the selected document
+        docs[docIndex] = applyHeader(docs[docIndex].trim(), documentHeader);
+        // Rejoin with proper separators
+        result = docs.map((doc, i) => {
+          if (i === 0) return doc;
+          return '\n---\n' + doc;
+        }).join('');
+      } else {
+        // If split didn't work as expected, apply to entire result
+        result = applyHeader(result, documentHeader);
+      }
+    } else {
+      // Single document - apply header directly
+      result = applyHeader(result, documentHeader);
+    }
+  }
+
   return {
     result,
     resultParsed: fixedResult,
     originalParsed,
-    comments
+    comments,
+    extractedHeader
   };
 }
 

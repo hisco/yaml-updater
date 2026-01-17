@@ -5925,4 +5925,350 @@ kind: ConfigMap
       });
     });
   });
+
+  describe('setYamlNode - insert complete YAML sub-documents', () => {
+    it('should insert object with block comments', () => {
+      const yamlString = `
+apiVersion: v1
+kind: ConfigMap
+data:
+  database: null
+`;
+
+      const subYaml = `# Production database config
+host: db.production.com
+port: 5432`;
+
+      const { result, resultParsed } = updateYaml<K8sConfigMap>({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed) => parsed.data.database,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      // Verify structure
+      expect(resultParsed.data.database).toBeDefined();
+      expect((resultParsed.data.database as any).host).toBe('db.production.com');
+      expect((resultParsed.data.database as any).port).toBe(5432);
+
+      // Verify comment is preserved
+      expect(result).toContain('# Production database config');
+      expect(result).toContain('host: db.production.com');
+      expect(result).toContain('port: 5432');
+    });
+
+    it('should insert object with inline comments', () => {
+      const yamlString = `
+config:
+  server: null
+`;
+
+      const subYaml = `host: localhost  # Server hostname
+port: 8080  # Server port`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.server,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      // Verify inline comments are preserved
+      expect(result).toContain('# Server hostname');
+      expect(result).toContain('# Server port');
+      expect(result).toContain('host: localhost');
+      expect(result).toContain('port: 8080');
+    });
+
+    it('should insert array structure with comments', () => {
+      const yamlString = `
+config:
+  items: []
+`;
+
+      const subYaml = `# First item
+- name: item1
+  value: 100
+# Second item
+- name: item2
+  value: 200`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.items,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      // Verify array structure
+      expect(Array.isArray((resultParsed as any).config.items)).toBe(true);
+      expect((resultParsed as any).config.items).toHaveLength(2);
+      expect((resultParsed as any).config.items[0].name).toBe('item1');
+
+      // Verify comments preserved
+      expect(result).toContain('# First item');
+      expect(result).toContain('# Second item');
+    });
+
+    it('should insert scalar value', () => {
+      const yamlString = `
+config:
+  setting: null
+`;
+
+      const subYaml = `production-value`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.setting,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      expect((resultParsed as any).config.setting).toBe('production-value');
+      expect(result).toContain('setting: production-value');
+    });
+
+    it('should preserve YAML anchors and aliases', () => {
+      const yamlString = `
+config:
+  services: null
+`;
+
+      const subYaml = `defaults: &def
+  timeout: 30
+  retries: 3
+prod:
+  <<: *def
+  host: prod.example.com`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.services,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      // Verify anchor and merge key syntax in output
+      expect(result).toContain('&def');
+      expect(result).toContain('<<: *def');
+      expect(result).toContain('timeout: 30');
+
+      // Verify values - note that the merge key is preserved in the YAML
+      // but toJSON() treats << as a literal key, not a merge operation
+      const services = (resultParsed as any).config.services;
+      expect(services.defaults.timeout).toBe(30);
+      expect(services.defaults.retries).toBe(3);
+      expect(services.prod.host).toBe('prod.example.com');
+      // The << key contains the merged values as an object
+      expect(services.prod['<<']).toEqual({ timeout: 30, retries: 3 });
+    });
+
+    it('should handle multiple levels of nesting with comments', () => {
+      const yamlString = `
+config:
+  database: null
+`;
+
+      const subYaml = `# Database section
+production:
+  # Production settings
+  host: prod.db.com
+  credentials:
+    # Stored securely
+    username: admin`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.database,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      // Verify all nested comments preserved
+      expect(result).toContain('# Database section');
+      expect(result).toContain('# Production settings');
+      expect(result).toContain('# Stored securely');
+
+      // Verify structure
+      const db = (resultParsed as any).config.database;
+      expect(db.production.host).toBe('prod.db.com');
+      expect(db.production.credentials.username).toBe('admin');
+    });
+
+    it('should work alongside change() calls', () => {
+      const yamlString = `
+config:
+  database: null
+  cache: null
+`;
+
+      const subYaml = `host: db.example.com
+port: 5432`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ change, setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.database,
+            yamlString: subYaml
+          });
+
+          change({
+            findKey: (parsed: any) => parsed.config,
+            merge: () => ({
+              cache: { host: 'redis.example.com', port: 6379 }
+            })
+          });
+        }
+      });
+
+      // Verify both operations worked
+      const cfg = (resultParsed as any).config;
+      expect(cfg.database.host).toBe('db.example.com');
+      expect(cfg.database.port).toBe(5432);
+      expect(cfg.cache.host).toBe('redis.example.com');
+      expect(cfg.cache.port).toBe(6379);
+    });
+
+    it('should throw error on invalid YAML syntax', () => {
+      const yamlString = `
+config:
+  data: null
+`;
+
+      const invalidYaml = `invalid: yaml: syntax:`;
+
+      expect(() => {
+        updateYaml({
+          yamlString,
+          annotate: ({ setYamlNode }) => {
+            setYamlNode({
+              findKey: (parsed: any) => parsed.config.data,
+              yamlString: invalidYaml
+            });
+          }
+        });
+      }).toThrow('Invalid YAML');
+    });
+
+    it('should throw error on empty YAML string', () => {
+      const yamlString = `
+config:
+  data: null
+`;
+
+      expect(() => {
+        updateYaml({
+          yamlString,
+          annotate: ({ setYamlNode }) => {
+            setYamlNode({
+              findKey: (parsed: any) => parsed.config.data,
+              yamlString: ''
+            });
+          }
+        });
+      }).toThrow('Invalid YAML');
+    });
+
+    it('should support comment callback', () => {
+      const yamlString = `
+config:
+  database: null
+`;
+
+      const subYaml = `host: localhost
+port: 5432`;
+
+      const { result, comments } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.database,
+            yamlString: subYaml,
+            comment: () => 'Complete database configuration'
+          });
+        }
+      });
+
+      // Verify comment appears above the property
+      expect(result).toContain('# Complete database configuration');
+      expect(comments).toHaveLength(1);
+      expect(comments[0].comment).toBe('Complete database configuration');
+      expect(comments[0].path).toEqual(['config', 'database']);
+    });
+
+    it('should handle deep nested paths', () => {
+      const yamlString = `
+app:
+  config:
+    services:
+      backend:
+        database: null
+`;
+
+      const subYaml = `host: deep.db.com
+port: 3306`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.app.config.services.backend.database,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      const db = (resultParsed as any).app.config.services.backend.database;
+      expect(db.host).toBe('deep.db.com');
+      expect(db.port).toBe(3306);
+      expect(result).toContain('host: deep.db.com');
+    });
+
+    it('should preserve flow style from sub-document', () => {
+      const yamlString = `
+config:
+  metadata: null
+`;
+
+      const subYaml = `{version: "1.0", env: prod, tags: [api, backend]}`;
+
+      const { result, resultParsed } = updateYaml({
+        yamlString,
+        annotate: ({ setYamlNode }) => {
+          setYamlNode({
+            findKey: (parsed: any) => parsed.config.metadata,
+            yamlString: subYaml
+          });
+        }
+      });
+
+      // Verify flow style is preserved
+      expect(result).toContain('{');
+      expect(result).toContain('[');
+      const meta = (resultParsed as any).config.metadata;
+      expect(meta.version).toBe('1.0');
+      expect(meta.env).toBe('prod');
+      expect(meta.tags).toEqual(['api', 'backend']);
+    });
+  });
 });

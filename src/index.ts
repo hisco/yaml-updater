@@ -1,5 +1,5 @@
 import { diff as deepDiff, Diff } from 'deep-diff';
-import { Document, parseAllDocuments, Node, YAMLMap, Scalar } from 'yaml';
+import { Document, parseAllDocuments, parseDocument, Node, YAMLMap, Scalar } from 'yaml';
 import { updateObject, addInstructions as addObjectInstructions, CommentInstructions, MergeInstructions, findKeyByProxy } from '@hiscojs/object-updater';
 
 // Type definitions for deep-diff
@@ -362,6 +362,11 @@ export function updateYaml<T>({
       merge: (originalValue: L) => Partial<L> | undefined;
       comment?: (prev?: string) => string | undefined;
     }) => void;
+    setYamlNode: <L>(options: {
+      findKey: (parsed: T) => L;
+      yamlString: string;
+      comment?: (prev?: string) => string | undefined;
+    }) => void;
   }) => void;
   defaultFlow?: boolean;  // Default flow style for all nodes (false = block style, true = flow style)
   documentHeader?: DocumentHeader;  // Document header configuration
@@ -686,6 +691,13 @@ export function updateYaml<T>({
     }
   };
 
+  // Track YAML node replacements for direct insertion (setYamlNode)
+  const yamlNodeReplacements = new Map<string, {
+    node: Node;
+    path: (string | number)[];
+    comment?: string;
+  }>();
+
   const { result: updatedObject, comments: objectComments } = updateObject({
     sourceObject: originalParsed,
     annotate: annotate ? (objectAnnotator) => {
@@ -727,6 +739,73 @@ export function updateYaml<T>({
               }
               return undefined;
             } : undefined
+          });
+        },
+
+        setYamlNode: <L>(options: {
+          findKey: (parsed: T) => L;
+          yamlString: string;
+          comment?: (prev?: string) => string | undefined;
+        }) => {
+          // 1. Parse the sub-document YAML string
+          const subDoc = parseDocument(options.yamlString);
+
+          // 2. Validate the parsed document
+          if (!subDoc.contents) {
+            throw new Error('Invalid YAML in setYamlNode: no contents found');
+          }
+
+          if (subDoc.errors && subDoc.errors.length > 0) {
+            const errors = subDoc.errors.map((e: any) => e.message).join(', ');
+            throw new Error(`Invalid YAML in setYamlNode: ${errors}`);
+          }
+
+          // 3. Find target path using proxy tracking
+          const targetPath = findKeyByProxy(originalParsed as T, options.findKey);
+
+          // 4. Extract the parsed value for object-updater (to keep diff calculation in sync)
+          const subDocValue = subDoc.toJSON();
+
+          // 5. Update the object through objectAnnotator (this ensures diff sees the change)
+          // We need to target the parent and set the property, not merge into the target itself
+          // because the target might be null or a value that can't be merged into
+          // Note: We don't pass the comment here because it would be tracked at the wrong path
+          if (targetPath.length === 0) {
+            // Root level replacement - merge directly
+            objectAnnotator.change({
+              findKey: options.findKey,
+              merge: () => subDocValue
+            });
+          } else {
+            // Non-root level - target parent and set the property
+            const propertyKey = targetPath[targetPath.length - 1];
+            const parentPath = targetPath.slice(0, -1);
+
+            objectAnnotator.change({
+              findKey: parentPath.length === 0
+                ? (parsed: T) => parsed
+                : (parsed: T) => {
+                    let current: any = parsed;
+                    for (const key of parentPath) {
+                      current = current[key];
+                    }
+                    return current;
+                  },
+              merge: (parent) => ({
+                ...parent,
+                [propertyKey]: subDocValue
+              })
+            });
+          }
+
+          // 6. Store the complete node for direct insertion later (preserves all formatting)
+          // Also store the comment to be applied after node insertion
+          const pathKey = JSON.stringify(targetPath);
+          const commentText = options.comment ? options.comment(undefined) : undefined;
+          yamlNodeReplacements.set(pathKey, {
+            node: subDoc.contents,
+            path: targetPath,
+            comment: commentText
           });
         }
       });
@@ -972,8 +1051,67 @@ export function updateYaml<T>({
     }
   });
 
-  // Step 5: Apply comments to YAML nodes
+  // Step 4.5: Apply direct YAML node replacements (from setYamlNode)
+  // This happens AFTER diff application but BEFORE comment application
+  // to preserve ALL formatting, comments, and anchors from the sub-document
   const comments: { path: (string | number)[]; comment: string }[] = [];
+
+  yamlNodeReplacements.forEach(({ node, path, comment }) => {
+    // Ensure parent exists and is in block style
+    changeSpecificNodesToNoneFlow(originalYamlDocument, path.slice(0, -1));
+
+    // Insert the complete node as-is (preserves all metadata)
+    originalYamlDocument.setIn(path, node);
+
+    // Detect and track anchors in the inserted node
+    detectAnchorsInNode(node, path, anchorMap);
+
+    // Apply comment directly to the Pair's key (to appear above the property)
+    if (comment && path.length > 0) {
+      const parentPath = path.slice(0, -1);
+      const propKey = path[path.length - 1];
+      const parent = parentPath.length === 0
+        ? originalYamlDocument.contents
+        : originalYamlDocument.getIn(parentPath, true);
+
+      if (parent && typeof parent === 'object' && 'items' in parent && Array.isArray(parent.items)) {
+        // Parent is a YAMLMap, find the Pair with matching key
+        const pair = parent.items.find((item: any) => {
+          if (!item || typeof item !== 'object' || !('key' in item)) {
+            return false;
+          }
+          const keyNode = item.key;
+          if (!keyNode) {
+            return false;
+          }
+          // Check if key has a value property (it's a Scalar node)
+          if (typeof keyNode === 'object' && 'value' in keyNode) {
+            return keyNode.value === propKey;
+          }
+          return keyNode === propKey;
+        });
+
+        if (pair && typeof pair === 'object' && 'key' in pair) {
+          // Convert key to Scalar if needed
+          if (pair.key && typeof pair.key !== 'object') {
+            pair.key = new Scalar(pair.key);
+          }
+          // Apply comment to Pair's key
+          if (pair.key && typeof pair.key === 'object') {
+            (pair.key as any).commentBefore = ' ' + comment;
+          }
+        }
+      }
+
+      // Track the comment for the return value
+      comments.push({
+        path,
+        comment
+      });
+    }
+  });
+
+  // Step 5: Apply comments to YAML nodes
 
   // First apply comments from the change() comment callback
   objectComments.forEach(({ path, comment: commentText, direction }) => {
@@ -1507,6 +1645,63 @@ function detectExistingAnchors(
 
   if (doc.contents) {
     visitNode(doc.contents);
+  }
+}
+
+/**
+ * Detect anchors in a specific node and add them to the anchor map
+ * Used after inserting nodes via setYamlNode() to track their anchors
+ */
+function detectAnchorsInNode(
+  node: Node,
+  basePath: (string | number)[],
+  anchorMap: Map<string, { path: (string | number)[]; node?: Node }>
+): void {
+  if (!node || typeof node !== 'object') {
+    return;
+  }
+
+  const yamlNode = node as any;
+
+  // Check if this node has an anchor
+  if (yamlNode.anchor && typeof yamlNode.anchor === 'string') {
+    const anchorName = yamlNode.anchor;
+    // Only add if anchor doesn't already exist in the map
+    if (!anchorMap.has(anchorName)) {
+      anchorMap.set(anchorName, {
+        path: basePath,
+        node: yamlNode as Node
+      });
+    }
+  }
+
+  // Recursively visit children
+  if ('items' in yamlNode && Array.isArray(yamlNode.items)) {
+    // Check if it's a MAP (items have 'key' property) or SEQ
+    const isMap = yamlNode.items.length > 0 && yamlNode.items[0] && 'key' in yamlNode.items[0];
+
+    if (isMap) {
+      // It's a MAP - iterate through pairs
+      yamlNode.items.forEach((pair: any) => {
+        if (pair && typeof pair === 'object' && pair.key && pair.value) {
+          // Get the key value
+          let key: string | number;
+          if (typeof pair.key === 'object' && 'value' in pair.key) {
+            key = pair.key.value;
+          } else {
+            key = pair.key;
+          }
+
+          // Visit the value node
+          detectAnchorsInNode(pair.value, [...basePath, key], anchorMap);
+        }
+      });
+    } else {
+      // It's a SEQ - iterate through items
+      yamlNode.items.forEach((item: any, index: number) => {
+        detectAnchorsInNode(item, [...basePath, index], anchorMap);
+      });
+    }
   }
 }
 

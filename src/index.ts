@@ -367,6 +367,9 @@ export function updateYaml<T>({
       yamlString: string;
       comment?: (prev?: string) => string | undefined;
     }) => void;
+    getYamlNode: <L>(options: {
+      findKey: (parsed: T) => L;
+    }) => string;
   }) => void;
   defaultFlow?: boolean;  // Default flow style for all nodes (false = block style, true = flow style)
   documentHeader?: DocumentHeader;  // Document header configuration
@@ -807,6 +810,32 @@ export function updateYaml<T>({
             path: targetPath,
             comment: commentText
           });
+        },
+
+        getYamlNode: <L>(options: {
+          findKey: (parsed: T) => L;
+        }): string => {
+          // 1. Find the target path using proxy tracking
+          const targetPath = findKeyByProxy(originalParsed as T, options.findKey);
+
+          // 2. Extract the node from the YAML document
+          const node = originalYamlDocument.getIn(targetPath, false);
+
+          // 3. Validate that the node exists
+          if (!node || node === null || node === undefined) {
+            throw new Error(
+              `Cannot extract YAML node: path ${JSON.stringify(targetPath)} not found in document`
+            );
+          }
+
+          // 4. Create a temporary document with this node as contents
+          const tempDoc = new Document(node);
+
+          // 5. Convert to YAML string with all formatting preserved
+          // lineWidth: 0 prevents line wrapping
+          const yamlString = tempDoc.toString({ lineWidth: 0 });
+
+          return yamlString;
         }
       });
     } : undefined

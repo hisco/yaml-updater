@@ -44,7 +44,8 @@ console.log(result);
 - **Type-Safe**: Full TypeScript support with generic type parameters
 - **Comment Preservation**: Automatically preserves existing YAML comments
 - **Comment Manipulation**: Add, remove, or update comments programmatically
-- **Document Headers**: Add, extract, and manage headers at the top of YAML documents (new!)
+- **Complete YAML Sub-Documents**: Extract and insert YAML blocks with all formatting preserved (new!)
+- **Document Headers**: Add, extract, and manage headers at the top of YAML documents
 - **YAML Anchors & Aliases**: Create reusable content with anchors, aliases, and merge keys
 - **Anchor Renaming**: Rename anchors and update all references document-wide
 - **Schema-Level Instructions**: Define structure metadata separately from data (OpenAPI-style)
@@ -73,6 +74,8 @@ interface UpdateYamlOptions<T> {
   documentHeader?: DocumentHeader;  // Optional document header
   annotate?: (annotator: {
     change: <L>(options: ChangeOptions<T, L>) => void;
+    setYamlNode: <L>(options: SetYamlNodeOptions<T, L>) => void;
+    getYamlNode: <L>(options: GetYamlNodeOptions<T, L>) => string;
   }) => void;
   defaultFlow?: boolean;  // Default flow style for all nodes
 }
@@ -132,6 +135,30 @@ interface ChangeOptions<T, L> {
   merge: (originalValue: L) => Partial<L>;
   comment?: (previousComment?: string) => string | undefined;
 }
+```
+
+### `setYamlNode<L>(options)`
+
+Inserts a complete YAML sub-document with all formatting, comments, and anchors preserved exactly as-is.
+
+```typescript
+interface SetYamlNodeOptions<T, L> {
+  findKey: (parsed: T) => L;
+  yamlString: string;  // YAML string to insert
+  comment?: (previousComment?: string) => string | undefined;
+}
+```
+
+### `getYamlNode<L>(options)`
+
+Extracts a complete YAML sub-document as a string with all formatting, comments, and anchors preserved.
+
+```typescript
+interface GetYamlNodeOptions<T, L> {
+  findKey: (parsed: T) => L;
+}
+
+// Returns: string (YAML with all metadata preserved)
 ```
 
 ## Basic Usage
@@ -627,6 +654,341 @@ const { result } = updateYaml({
         }),
         data: { key: 'value' }
       })
+    });
+  }
+});
+```
+
+## Working with Complete YAML Sub-Documents
+
+The `getYamlNode()` and `setYamlNode()` functions allow you to extract and insert complete YAML sub-documents with **all formatting, comments, and anchors preserved exactly as-is**.
+
+### Why Use These Functions?
+
+**vs. `change()` + `merge()`:**
+- `change()` works with plain JavaScript objects - loses all YAML metadata (comments, anchors, formatting)
+- `getYamlNode()` + `setYamlNode()` preserve **everything**: comments, anchors, aliases, flow style, indentation
+
+**Use cases:**
+- Extract configuration sections from large YAML files
+- Copy/move YAML blocks between locations
+- Move sub-documents to root level
+- Migrate YAML sections to separate files
+- Template generation with full formatting control
+
+### Extracting YAML Sub-Documents
+
+Use `getYamlNode()` to extract a complete YAML sub-document as a string:
+
+```typescript
+const yamlString = `
+database:
+  # Production database configuration
+  host: db.production.com
+  port: 5432
+  credentials:
+    # Stored in secrets manager
+    username: admin
+    password: secret
+`;
+
+let extractedYaml = '';
+updateYaml({
+  yamlString,
+  annotate: ({ getYamlNode }) => {
+    extractedYaml = getYamlNode({
+      findKey: (parsed) => parsed.database
+    });
+  }
+});
+
+console.log(extractedYaml);
+// Output:
+// # Production database configuration
+// host: db.production.com
+// port: 5432
+// credentials:
+//   # Stored in secrets manager
+//   username: admin
+//   password: secret
+```
+
+**All metadata is preserved:**
+- ✓ All comments (block and inline)
+- ✓ Anchors and aliases
+- ✓ Flow style formatting
+- ✓ Exact indentation and spacing
+
+### Inserting YAML Sub-Documents
+
+Use `setYamlNode()` to insert a complete YAML string:
+
+```typescript
+const mainYaml = `
+application:
+  name: myapp
+database: {}
+`;
+
+const databaseConfig = `
+# Database configuration
+host: localhost
+port: 5432
+credentials:
+  # Sensitive data
+  username: admin
+  password: secret
+`;
+
+const { result } = updateYaml({
+  yamlString: mainYaml,
+  annotate: ({ setYamlNode }) => {
+    setYamlNode({
+      findKey: (parsed) => parsed.database,
+      yamlString: databaseConfig,
+      comment: () => 'Complete database configuration'
+    });
+  }
+});
+
+// Output:
+// application:
+//   name: myapp
+// # Complete database configuration
+// database:
+//   # Database configuration
+//   host: localhost
+//   port: 5432
+//   credentials:
+//     # Sensitive data
+//     username: admin
+//     password: secret
+```
+
+### Copy/Move Operations
+
+Combine `getYamlNode()` and `setYamlNode()` for powerful copy/move operations:
+
+```typescript
+const yamlString = `
+environments:
+  staging:
+    # Staging environment config
+    replicas: 2
+    resources:
+      memory: 1Gi
+      cpu: 500m
+    features:
+      - feature-flags
+      - debug-mode  # Enable debug logs
+  production:
+    replicas: 5
+`;
+
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ getYamlNode, setYamlNode }) => {
+    // Extract staging resources
+    const stagingResources = getYamlNode({
+      findKey: (parsed) => parsed.environments.staging.resources
+    });
+
+    // Copy to production (all formatting preserved)
+    setYamlNode({
+      findKey: (parsed) => parsed.environments.production.resources,
+      yamlString: stagingResources,
+      comment: () => 'Copied from staging'
+    });
+  }
+});
+
+// Output:
+// environments:
+//   staging:
+//     # Staging environment config
+//     replicas: 2
+//     resources:
+//       memory: 1Gi
+//       cpu: 500m
+//     features:
+//       - feature-flags
+//       - debug-mode # Enable debug logs
+//   production:
+//     replicas: 5
+//     # Copied from staging
+//     resources:
+//       memory: 1Gi
+//       cpu: 500m
+```
+
+### Moving Sub-Document to Root Level
+
+Extract a sub-document and make it the entire document:
+
+```typescript
+const yamlString = `
+# Top level comment
+application:
+  name: myapp
+  version: 1.0.0
+
+database:
+  # Database configuration
+  host: localhost
+  port: 5432
+  credentials:
+    # Sensitive data
+    username: admin
+    password: secret
+  settings:
+    pool_size: 10  # Connection pool
+    timeout: 30
+
+cache:
+  enabled: true
+`;
+
+const { result } = updateYaml({
+  yamlString,
+  annotate: ({ getYamlNode, setYamlNode }) => {
+    // Extract database configuration
+    const databaseConfig = getYamlNode({
+      findKey: (parsed) => parsed.database
+    });
+
+    // Replace entire document with database config
+    setYamlNode({
+      findKey: (parsed) => parsed,  // Root level
+      yamlString: databaseConfig
+    });
+  }
+});
+
+// Output (database is now the entire document):
+// # Database configuration
+// host: localhost
+// port: 5432
+// credentials:
+//   # Sensitive data
+//   username: admin
+//   password: secret
+// settings:
+//   pool_size: 10 # Connection pool
+//   timeout: 30
+```
+
+**Result:**
+- Database configuration becomes the entire document
+- All comments preserved at every level
+- Original top-level fields (`application`, `cache`) removed
+- The `database:` key is gone - its contents are now the root
+
+### Extracting Different Types
+
+**Extract scalar values:**
+```typescript
+const yaml = `version: "1.0.0"`;
+const version = getYamlNode({ findKey: (p) => p.version });
+// Returns: "1.0.0"
+```
+
+**Extract arrays with comments:**
+```typescript
+const yaml = `
+items:
+  - item1
+  - item2  # important item
+  - item3
+`;
+const items = getYamlNode({ findKey: (p) => p.items });
+// Returns:
+// - item1
+// - item2  # important item
+// - item3
+```
+
+**Extract with anchors:**
+```typescript
+const yaml = `
+defaults: &def
+  timeout: 30
+  retries: 3
+production:
+  host: prod.com
+`;
+const defaults = getYamlNode({ findKey: (p) => p.defaults });
+// Returns:
+// &def
+// timeout: 30
+// retries: 3
+```
+
+### Error Handling
+
+`getYamlNode()` throws an error if the path doesn't exist:
+
+```typescript
+try {
+  updateYaml({
+    yamlString: 'foo: bar',
+    annotate: ({ getYamlNode }) => {
+      getYamlNode({ findKey: (p) => p.nonexistent });  // Throws error
+    }
+  });
+} catch (error) {
+  // Error: Cannot extract YAML node: path ["nonexistent"] not found in document
+}
+```
+
+### Comparison: `change()` vs `setYamlNode()`
+
+| Feature | `change()` + `merge()` | `setYamlNode()` |
+|---------|------------------------|------------------|
+| **Input** | JavaScript object | YAML string |
+| **Comments** | Lost (must add manually) | Preserved exactly |
+| **Anchors** | Lost (must recreate) | Preserved exactly |
+| **Formatting** | New formatting applied | Original formatting kept |
+| **Flow style** | Lost | Preserved |
+| **Use case** | Modify values | Insert complete YAML blocks |
+
+**When to use `change()`:**
+- Updating specific property values
+- Merging new data with existing
+- Working with plain JavaScript objects
+
+**When to use `setYamlNode()` + `getYamlNode()`:**
+- Copying YAML sections with all formatting
+- Moving configuration blocks
+- Extracting sub-documents to separate files
+- Preserving all metadata exactly
+
+### Real-World Example: Configuration Migration
+
+```typescript
+// Extract staging config and promote to production
+const { result } = updateYaml({
+  yamlString: multiEnvConfig,
+  annotate: ({ getYamlNode, setYamlNode }) => {
+    // Extract staging configuration
+    const stagingConfig = getYamlNode({
+      findKey: (parsed) => parsed.environments.staging
+    });
+
+    // Archive current production to rollback
+    const currentProd = getYamlNode({
+      findKey: (parsed) => parsed.environments.production
+    });
+    setYamlNode({
+      findKey: (parsed) => parsed.environments.rollback,
+      yamlString: currentProd,
+      comment: () => 'Previous production (for rollback)'
+    });
+
+    // Promote staging to production
+    setYamlNode({
+      findKey: (parsed) => parsed.environments.production,
+      yamlString: stagingConfig,
+      comment: () => 'Promoted from staging'
     });
   }
 });

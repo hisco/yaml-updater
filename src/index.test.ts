@@ -6271,4 +6271,305 @@ config:
       expect(meta.tags).toEqual(['api', 'backend']);
     });
   });
+
+  describe('getYamlNode - extract complete YAML sub-documents', () => {
+    it('should extract object with comments', () => {
+      const input = `
+database:
+  # Comment above host
+  host: localhost
+  port: 5432  # inline comment
+`;
+
+      let extracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          extracted = getYamlNode({ findKey: (p: any) => p.database });
+        }
+      });
+
+      // Verify extracted contains both comments
+      expect(extracted).toContain('# Comment above host');
+      expect(extracted).toContain('# inline comment');
+      expect(extracted).toContain('host: localhost');
+      expect(extracted).toContain('port: 5432');
+    });
+
+    it('should extract array structure with comments', () => {
+      const input = `
+items:
+  - item1
+  - item2  # comment on item2
+  - item3
+`;
+
+      let extracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          extracted = getYamlNode({ findKey: (p: any) => p.items });
+        }
+      });
+
+      // Verify array and comment preserved
+      expect(extracted).toContain('- item1');
+      expect(extracted).toContain('- item2');
+      expect(extracted).toContain('# comment on item2');
+      expect(extracted).toContain('- item3');
+    });
+
+    it('should extract scalar value', () => {
+      const input = `
+version: "1.0.0"
+name: my-app
+`;
+
+      let versionExtracted = '';
+      let nameExtracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          versionExtracted = getYamlNode({ findKey: (p: any) => p.version });
+          nameExtracted = getYamlNode({ findKey: (p: any) => p.name });
+        }
+      });
+
+      // Scalars are returned without quotes unless necessary
+      expect(versionExtracted.trim()).toBe('1.0.0');
+      expect(nameExtracted.trim()).toBe('my-app');
+    });
+
+    it('should extract YAML with anchors', () => {
+      const input = `
+defaults: &def
+  timeout: 30
+  retries: 3
+production:
+  host: prod.com
+  settings: &prod-settings
+    cache: true
+    debug: false
+`;
+
+      let extracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          // Extract the defaults which has an anchor
+          extracted = getYamlNode({ findKey: (p: any) => p.defaults });
+        }
+      });
+
+      // Verify anchor is preserved
+      expect(extracted).toContain('&def');
+      expect(extracted).toContain('timeout: 30');
+      expect(extracted).toContain('retries: 3');
+    });
+
+    it('should extract deeply nested structure with comments', () => {
+      const input = `
+root:
+  level1:
+    level2:
+      # Nested comment
+      level3:
+        value: 123
+`;
+
+      let extracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          extracted = getYamlNode({ findKey: (p: any) => p.root.level1.level2.level3 });
+        }
+      });
+
+      expect(extracted).toContain('value: 123');
+      // Note: The comment is on level2, not level3, so it won't be in the extracted subtree
+    });
+
+    it('should support copy/move operation using getYamlNode + setYamlNode', () => {
+      const input = `
+staging:
+  # Staging config
+  host: staging.com
+  port: 8080
+production: {}
+`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode, setYamlNode }) => {
+          const stagingConfig = getYamlNode({ findKey: (p: any) => p.staging });
+          setYamlNode({
+            findKey: (p: any) => p.production,
+            yamlString: stagingConfig,
+            comment: () => 'Copied from staging'
+          });
+        }
+      });
+
+      // Verify production has staging's config with comments
+      expect(result).toContain('# Copied from staging');
+      expect(result).toContain('host: staging.com');
+      expect(result).toContain('port: 8080');
+    });
+
+    it('should throw error on path not found', () => {
+      const input = `foo: bar`;
+
+      expect(() => {
+        updateYaml({
+          yamlString: input,
+          annotate: ({ getYamlNode }) => {
+            getYamlNode({ findKey: (p: any) => p.nonexistent });
+          }
+        });
+      }).toThrow(/path.*not found/);
+    });
+
+    it('should throw error on extracting null value', () => {
+      const input = `foo: null`;
+
+      expect(() => {
+        updateYaml({
+          yamlString: input,
+          annotate: ({ getYamlNode }) => {
+            getYamlNode({ findKey: (p: any) => p.foo });
+          }
+        });
+      }).toThrow(/not found/);
+    });
+
+    it('should throw error on extracting undefined property', () => {
+      const input = `foo: bar`;
+
+      expect(() => {
+        updateYaml({
+          yamlString: input,
+          annotate: ({ getYamlNode }) => {
+            getYamlNode({ findKey: (p: any) => p.missing });
+          }
+        });
+      }).toThrow(/not found/);
+    });
+
+    it('should extract root document', () => {
+      const input = `
+# Root comment
+foo: bar
+baz: qux
+`;
+
+      let extracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          extracted = getYamlNode({ findKey: (p: any) => p });
+        }
+      });
+
+      expect(extracted).toContain('foo: bar');
+      expect(extracted).toContain('baz: qux');
+    });
+
+    it('should preserve flow style when extracting', () => {
+      const input = `
+config: {compact: true, inline: yes}
+`;
+
+      let extracted = '';
+      updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode }) => {
+          extracted = getYamlNode({ findKey: (p: any) => p.config });
+        }
+      });
+
+      // Verify flow style is preserved
+      expect(extracted).toMatch(/\{.*\}/);
+      expect(extracted).toContain('compact');
+      expect(extracted).toContain('inline');
+    });
+
+    it('should support extract then re-insert (round-trip test)', () => {
+      const input = `
+source:
+  # Important config
+  items:
+    - name: item1
+      value: 100  # first item
+    - name: item2
+      value: 200
+target: {}
+`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode, setYamlNode }) => {
+          const sourceItems = getYamlNode({ findKey: (p: any) => p.source.items });
+          setYamlNode({
+            findKey: (p: any) => p.target,
+            yamlString: sourceItems
+          });
+        }
+      });
+
+      // Verify target now has source.items with all comments
+      expect(result).toContain('# first item');
+    });
+
+    it('should move sub-document to root level with all comments', () => {
+      const input = `
+# Top level comment
+application:
+  name: my-app
+  version: 1.0.0
+
+database:
+  # Database configuration
+  host: localhost
+  port: 5432
+  credentials:
+    # Sensitive data
+    username: admin
+    password: secret
+  settings:
+    pool_size: 10  # Connection pool
+    timeout: 30
+
+cache:
+  enabled: true
+`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        annotate: ({ getYamlNode, setYamlNode }) => {
+          // Extract the database configuration
+          const databaseConfig = getYamlNode({ findKey: (p: any) => p.database });
+
+          // Set it as the root level (replace everything)
+          setYamlNode({
+            findKey: (p: any) => p,  // Root level
+            yamlString: databaseConfig
+          });
+        }
+      });
+
+      const expected = `# Database configuration
+host: localhost
+port: 5432
+credentials:
+  # Sensitive data
+  username: admin
+  password: secret
+settings:
+  pool_size: 10 # Connection pool
+  timeout: 30
+`;
+
+      expect(result).toEqual(expected);
+    });
+  });
 });

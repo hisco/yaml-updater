@@ -6572,4 +6572,204 @@ settings:
       expect(result).toEqual(expected);
     });
   });
+
+  describe('Empty Object Rendering', () => {
+    it('should render empty object without braces when merge returns empty object (defaultFlow: false)', () => {
+      const input = `database:
+  host: localhost
+
+staging:
+  host: staging.com`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        defaultFlow: false,  // Explicit default
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: (original) => ({
+              ...original,
+              production: {}  // Merge returns empty object
+            })
+          });
+        }
+      });
+
+      const expected = `database:
+  host: localhost
+
+staging:
+  host: staging.com
+production:
+`;
+
+      expect(result).toEqual(expected);
+    });
+
+    it('should render empty object with braces when defaultFlow is true', () => {
+      const input = `database:
+  host: localhost
+
+staging:
+  host: staging.com`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        defaultFlow: true,  // Flow style requested
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: (original) => ({
+              ...original,
+              production: {}  // Merge returns empty object
+            })
+          });
+        }
+      });
+
+      const expected = `database:
+  host: localhost
+
+staging:
+  host: staging.com
+production: {}
+`;
+
+      expect(result).toEqual(expected);
+    });
+
+    it('should render empty object without braces with addInstructions comment (defaultFlow: false)', () => {
+      const input = `database:
+  host: localhost
+
+staging:
+  host: staging.com`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        defaultFlow: false,  // Block style (default)
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: (original) => ({
+              ...original,
+              ...addInstructions({
+                prop: 'production',
+                comment: 'Production environment'
+              }),
+              production: {}  // Empty object with comment
+            })
+          });
+        }
+      });
+
+      const expected = `database:
+  host: localhost
+
+staging:
+  host: staging.com
+# Production environment
+production:
+`;
+
+      expect(result).toEqual(expected);
+    });
+
+    it('should render empty object with braces with addInstructions comment (defaultFlow: true)', () => {
+      const input = `database:
+  host: localhost
+
+staging:
+  host: staging.com`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        defaultFlow: true,  // Flow style requested
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: (original) => ({
+              ...original,
+              ...addInstructions({
+                prop: 'production',
+                comment: 'Production environment'
+              }),
+              production: {}  // Empty object with comment
+            })
+          });
+        }
+      });
+
+      const expected = `database:
+  host: localhost
+
+staging:
+  host: staging.com
+# Production environment
+production: {}
+`;
+
+      expect(result).toEqual(expected);
+    });
+
+    it('should respect per-property flow instruction for empty object', () => {
+      const input = `database:
+  host: localhost`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        defaultFlow: false,  // Default is block style
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: (original) => ({
+              ...original,
+              ...addInstructions({
+                prop: 'production',
+                flow: true  // Force this specific property to use flow style
+              }),
+              production: {}  // Empty object
+            })
+          });
+        }
+      });
+
+      const expected = `database:
+  host: localhost
+production: {}
+`;
+
+      expect(result).toEqual(expected);
+    });
+
+    it('should respect per-property flow: false instruction for empty object', () => {
+      const input = `database:
+  host: localhost`;
+
+      const { result } = updateYaml({
+        yamlString: input,
+        defaultFlow: true,  // Default is flow style
+        annotate: ({ change }) => {
+          change({
+            findKey: (parsed: any) => parsed,
+            merge: (original) => ({
+              ...original,
+              ...addInstructions({
+                prop: 'production',
+                flow: false  // Force this specific property to use block style
+              }),
+              production: {}  // Empty object
+            })
+          });
+        }
+      });
+
+      const expected = `database:
+  host: localhost
+production:
+`;
+
+      expect(result).toEqual(expected);
+    });
+  });
 });

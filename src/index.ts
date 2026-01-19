@@ -885,10 +885,26 @@ export function updateYaml<T>({
       const instructions = instructionsMap.get(pathKey);
       const flowStyle = instructions?.flow !== undefined ? instructions.flow : defaultFlow;
 
-      originalYamlDocument.setIn(
-        df.path,
-        originalYamlDocument.createNode(diffNew.rhs, { flow: flowStyle }),
-      );
+      // Check if we're creating an empty object/array and should render it without braces
+      let nodeToSet;
+      if (typeof diffNew.rhs === 'object' && diffNew.rhs !== null && flowStyle !== true) {
+        const isEmpty = Array.isArray(diffNew.rhs) ? diffNew.rhs.length === 0 : Object.keys(diffNew.rhs).length === 0;
+        // Check if this has merge anchor instructions - don't convert to null if it does
+        const hasMergeAnchor = instructions?.mergeAnchor;
+        if (isEmpty && !hasMergeAnchor) {
+          // Create a null scalar node instead of an empty object/array
+          nodeToSet = originalYamlDocument.createNode(null, { flow: flowStyle });
+          // Hide the null value to render as just "key:" without "null"
+          (nodeToSet as any).type = 'PLAIN';
+          (nodeToSet as any).source = '';
+        } else {
+          nodeToSet = originalYamlDocument.createNode(diffNew.rhs, { flow: flowStyle });
+        }
+      } else {
+        nodeToSet = originalYamlDocument.createNode(diffNew.rhs, { flow: flowStyle });
+      }
+
+      originalYamlDocument.setIn(df.path, nodeToSet);
     } else if (df.kind === 'D' && df.path) {
       // Deleted property
       originalYamlDocument.deleteIn(df.path);
@@ -902,7 +918,26 @@ export function updateYaml<T>({
       const instructions = instructionsMap.get(pathKey);
       const flowStyle = instructions?.flow !== undefined ? instructions.flow : defaultFlow;
 
-      originalYamlDocument.setIn(df.path, originalYamlDocument.createNode(diffEdit.rhs, { flow: flowStyle }));
+      // Check if we're editing to an empty object/array and should render it without braces
+      let nodeToSet;
+      if (typeof diffEdit.rhs === 'object' && diffEdit.rhs !== null && flowStyle !== true) {
+        const isEmpty = Array.isArray(diffEdit.rhs) ? diffEdit.rhs.length === 0 : Object.keys(diffEdit.rhs).length === 0;
+        // Check if this has merge anchor instructions - don't convert to null if it does
+        const hasMergeAnchor = instructions?.mergeAnchor;
+        if (isEmpty && !hasMergeAnchor) {
+          // Create a null scalar node instead of an empty object/array
+          nodeToSet = originalYamlDocument.createNode(null, { flow: flowStyle });
+          // Hide the null value to render as just "key:" without "null"
+          (nodeToSet as any).type = 'PLAIN';
+          (nodeToSet as any).source = '';
+        } else {
+          nodeToSet = originalYamlDocument.createNode(diffEdit.rhs, { flow: flowStyle });
+        }
+      } else {
+        nodeToSet = originalYamlDocument.createNode(diffEdit.rhs, { flow: flowStyle });
+      }
+
+      originalYamlDocument.setIn(df.path, nodeToSet);
     } else if (df.kind === 'A' && df.path) {
       // Array change - handle array updates specially
       const arrayPath = JSON.stringify(df.path);
@@ -1849,17 +1884,28 @@ function changeSpecificNodesToNoneFlow(originalYamlDocument: Document, path: (st
   const isEmptyObject = yamlNode.items && Array.isArray(yamlNode.items) && yamlNode.items.length === 0;
   const isEmptyArray = yamlNode.items && yamlNode.items instanceof Map && yamlNode.items.size === 0;
 
-  if (yamlNode.flow === true &&
-      (yamlNode.content === '{}' ||
-       yamlNode.content === '[]' ||
-       yamlNode.content === null ||
-       yamlNode.content === undefined ||
-       isEmptyObject ||
-       isEmptyArray)) {
+  // Force non-flow style for empty objects/arrays regardless of current flow setting
+  if (yamlNode.content === '{}' ||
+      yamlNode.content === '[]' ||
+      yamlNode.content === null ||
+      yamlNode.content === undefined ||
+      isEmptyObject ||
+      isEmptyArray) {
     yamlNode.flow = false;
+
+    // For empty objects/arrays, convert to null to render as just "key:" without any value
+    if (isEmptyObject || yamlNode.content === '{}') {
+      (yamlNode as any).value = null;
+      (yamlNode as any).type = 'PLAIN';
+      (yamlNode as any).source = '';
+    }
   }
 
   if (yamlNode.type === 'MAP' && yamlNode.items && Array.isArray(yamlNode.items) && yamlNode.items.length === 0 && yamlNode.commentBefore) {
     yamlNode.flow = false;
+    // Also convert to null for empty objects with comments
+    (yamlNode as any).value = null;
+    (yamlNode as any).type = 'PLAIN';
+    (yamlNode as any).source = '';
   }
 }
